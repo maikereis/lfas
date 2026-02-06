@@ -8,6 +8,7 @@ csv = "1.4.0"
 lazy_static = "1.5.0"
 nltk = "0.1.0"
 regex = "1.12.3"
+roaring = "0.11.3"
 serde = { version = "1.0.228", features = ["derive"] }
 stopwords = "0.1.1"
 unicode-normalization = "0.1.25"

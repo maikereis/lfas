@@ -1,3 +1,4 @@
+use roaring::RoaringBitmap;
 use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
 
@@ -24,9 +25,8 @@ impl<F> FieldMetadata<F> where F: Hash + Eq + Clone {
 
 /// Term -> (Field, DocId) -> Frequency
 pub struct InvertedIndex<F> where F: Hash + Eq + Clone {
-    // Composite key (Field, Term)
-    // The value is a Vec of tuples: (DocId, TermFrequency)
-    pub postings: BTreeMap<(F, String), Vec<(DocId, u32)>>,
+    // Composite key (Field, Term) -> RoaringBitmap
+    pub postings: BTreeMap<(F, String), RoaringBitmap>,
 }
 
 impl<F> InvertedIndex<F> where F: Hash + Eq + Clone + Ord {
@@ -35,21 +35,46 @@ impl<F> InvertedIndex<F> where F: Hash + Eq + Clone + Ord {
     }
 
     pub fn add_term(&mut self, id: DocId, field: F, term: String) {
-        let entry = self.postings.entry((field, term)).or_default();
-        
-        if let Some((last_id, count)) = entry.last_mut() {
-            if *last_id == id {
-                *count += 1;
-                return;
-            }
-        }
-        entry.push((id, 1));
+        let bitmap = self.postings.entry((field, term)).or_default();
+        // RoaringBitmap handles deduplication automatically
+        bitmap.insert(id as u32);
     }
 
-    /// Helper for tests to get only the DocIds for a term in a specific field
-    pub fn get_postings(&self, field: F, term: &str) -> Option<Vec<DocId>> {
+    /// Returns a reference to the bitmap for a specific field/term
+    pub fn get_postings(&self, field: F, term: &str) -> Option<&RoaringBitmap> {
         self.postings.get(&(field, term.to_string()))
-            .map(|list| list.iter().map(|(id, _freq)| *id).collect())
+    }
+
+    /// Performs an INTERSECTION (AND) of all provided terms within a field.
+    pub fn intersect_terms(&self, field: F, terms: &[&str]) -> RoaringBitmap {
+        let mut result = RoaringBitmap::new();
+        let mut first = true;
+
+        for term in terms {
+            if let Some(postings) = self.get_postings(field.clone(), term) {
+                if first {
+                    result = postings.clone();
+                    first = false;
+                } else {
+                    result &= postings; // Bitwise AND
+                }
+            } else {
+                // In an AND query, if one term doesn't exist, the whole result is empty
+                return RoaringBitmap::new();
+            }
+        }
+        result
+    }
+
+    /// Performs a UNION (OR) of all provided terms within a field.
+    pub fn union_terms(&self, field: F, terms: &[&str]) -> RoaringBitmap {
+        let mut result = RoaringBitmap::new();
+        for term in terms {
+            if let Some(postings) = self.get_postings(field.clone(), term) {
+                result |= postings; // Bitwise OR
+            }
+        }
+        result
     }
 }
 
@@ -57,8 +82,8 @@ impl<F> InvertedIndex<F> where F: Hash + Eq + Clone + Ord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Assuming your tokenizer is accessible here
     use crate::tokenizer::tokenize; 
+    // We import this to use the .iter() or .to_vec() methods if needed
 
     #[derive(Hash, Eq, PartialEq, Clone, Copy, Ord, PartialOrd, Debug)]
     enum AddressField {
@@ -102,11 +127,15 @@ mod tests {
 
         // Assert: "mauriti" should exist in the Street field for both documents
         let street_postings = idx.get_postings(AddressField::Street, "mauriti").expect("Term not found");
-        assert_eq!(street_postings, vec![1, 2]);
+        // RoaringBitmap contains u32, so we check inclusion
+        assert!(street_postings.contains(1));
+        assert!(street_postings.contains(2));
+        assert_eq!(street_postings.len(), 2);
 
         // Assert: "belem" should ONLY exist in the Municipality field for Doc 1
         let city_postings = idx.get_postings(AddressField::Municipality, "belem").expect("Term not found");
-        assert_eq!(city_postings, vec![1]);
+        assert!(city_postings.contains(1));
+        assert_eq!(city_postings.len(), 1);
 
         // Assert: Searching for "belem" in the Street field should return None
         let wrong_field = idx.get_postings(AddressField::Street, "belem");
@@ -115,10 +144,10 @@ mod tests {
 
     #[test]
     fn test_field_metadata_tracking() {
+        // FieldMetadata logic remains the same as it doesn't use the InvertedIndex bitmaps directly
         let mut meta = FieldMetadata::<AddressField>::new();
         let doc_id = 101;
 
-        // Manually simulating the indexing process for metadata
         let fields = vec![
             (AddressField::Street, vec!["rua", "augusta"]),
             (AddressField::Neighborhood, vec!["consolação"]),
@@ -135,9 +164,36 @@ mod tests {
             *total_field_len += len;
         }
 
-        // Verify metadata integrity
         assert_eq!(meta.total_docs, 1);
         assert_eq!(meta.lengths[&doc_id][&AddressField::Street], 2);
         assert_eq!(meta.total_field_lengths[&AddressField::Neighborhood], 1);
+    }
+
+    #[test]
+    fn test_set_operations() {
+        let mut idx = InvertedIndex::<AddressField>::new();
+        
+        let doc1_id = 1;
+        for token in tokenize("Travessa Mauriti") { idx.add_term(doc1_id, AddressField::Street, token); }
+        for token in tokenize("Belém") { idx.add_term(doc1_id, AddressField::Municipality, token); }
+
+        let doc2_id = 2;
+        for token in tokenize("Avenida Mauriti") { idx.add_term(doc2_id, AddressField::Street, token); }
+        for token in tokenize("Santarém") { idx.add_term(doc2_id, AddressField::Municipality, token); }
+
+        let intersection = idx.intersect_terms(AddressField::Street, &["avenida", "mauriti"]);
+        assert!(intersection.contains(2));
+        assert!(!intersection.contains(1));
+        assert_eq!(intersection.len(), 1);
+
+
+        let union = idx.union_terms(AddressField::Municipality, &["belem", "santarem"]);
+        assert!(union.contains(1));
+        assert!(union.contains(2));
+        assert_eq!(union.len(), 2);
+
+
+        let no_match = idx.intersect_terms(AddressField::Street, &["travessa", "santarem"]);
+        assert!(no_match.is_empty());
     }
 }
