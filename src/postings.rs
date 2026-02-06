@@ -1,6 +1,6 @@
+use crate::DocId;
 use roaring::RoaringBitmap;
 use std::collections::HashMap;
-use crate::DocId;
 
 #[derive(Debug, Clone)]
 pub struct Postings {

@@ -1,7 +1,6 @@
-
-use std::collections::{HashMap};
-use std::hash::Hash;
 use crate::DocId;
+use std::collections::HashMap;
+use std::hash::Hash;
 
 /// Keeps track of document lengths and global field stats.
 pub struct FieldMetadata<F> {
@@ -12,7 +11,10 @@ pub struct FieldMetadata<F> {
     pub total_docs: usize,
 }
 
-impl<F> FieldMetadata<F> where F: Hash + Eq + Clone {
+impl<F> FieldMetadata<F>
+where
+    F: Hash + Eq + Clone,
+{
     pub fn new() -> Self {
         Self {
             lengths: HashMap::new(),
@@ -21,7 +23,6 @@ impl<F> FieldMetadata<F> where F: Hash + Eq + Clone {
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -50,7 +51,7 @@ mod tests {
         for (field, tokens) in fields {
             let len = tokens.len();
             doc_entry.insert(field, len);
-            
+
             let total_field_len = meta.total_field_lengths.entry(field).or_insert(0);
             *total_field_len += len;
         }
@@ -59,5 +60,4 @@ mod tests {
         assert_eq!(meta.lengths[&doc_id][&AddressField::Street], 2);
         assert_eq!(meta.total_field_lengths[&AddressField::Neighborhood], 1);
     }
-
 }
