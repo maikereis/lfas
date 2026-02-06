@@ -84,8 +84,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
  
     }
 
-    let result = idx.get_postings(RecordField::Municipio, "castro");
-    println!("{:?}", result);
+    if let Some(postings) = idx.get_postings(RecordField::Municipio, "belem") {
+        println!("{:?}", postings.bitmap);
+    }
+
+    let intersection = idx.intersect_terms(RecordField::Municipio, &["belem"]);
+    println!("{:?}", intersection);
+
 
     Ok(())
 }
