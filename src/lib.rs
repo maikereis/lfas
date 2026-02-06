@@ -2,6 +2,8 @@ pub mod index;
 pub mod metadata;
 pub mod postings;
 pub mod tokenizer;
+pub mod scorer;
+pub mod engine;
 
 pub type DocId = usize;
 
@@ -47,4 +49,19 @@ impl Record {
             (RecordField::Nome, &self.nome),
         ]
     }
+}
+
+pub struct StructuredQuery {
+    pub fields: Vec<(RecordField, String)>,
+    pub top_k: usize,
+}
+
+#[derive(Debug)]
+pub struct SearchHit {
+    pub doc_id: usize,
+    pub score: f32,
+}
+
+pub trait AddressSearcher {
+    fn search(&self, query: StructuredQuery) -> Vec<SearchHit>;
 }
