@@ -2,7 +2,7 @@
 CARGO = cargo
 BINARY_NAME = lfas
 TEST_FLAGS = --all-features
-BENCH_NAME = index_benchmark
+BENCH_NAME ?= index_benchmark
 
 .PHONY: all build run test bench check clean doc help
 
@@ -21,9 +21,16 @@ run:
 test:
 	$(CARGO) test $(TEST_FLAGS)
 
-## Bench: Run criterion benchmarks
 bench:
 	$(CARGO) bench --bench $(BENCH_NAME)
+
+# Shortcut for index benchmarks
+bench-index:
+	$(CARGO) bench --bench index_benchmark
+
+# Shortcut for search benchmarks
+bench-search:
+	$(CARGO) bench --bench search_benchmark
 
 ## Check: Run clippy for linting and static analysis (Essential for Rust learners!)
 check:
