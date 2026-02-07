@@ -1,9 +1,11 @@
-use crate::tokenizer::tokenize;
+use crate::tokenizer::{tokenize_structured};
 use crate::{RecordField, SearchHit, StructuredQuery};
 use crate::index::InvertedIndex;
 use crate::metadata::FieldMetadata;
 use crate::scorer::BM25FScorer;
 use roaring::RoaringBitmap;
+use log::{info, debug};
+use crate::timing::Timer;
 
 pub struct SearchEngine {
     pub index: InvertedIndex<RecordField>,
@@ -12,31 +14,74 @@ pub struct SearchEngine {
 }
 
 impl SearchEngine {
-    pub fn execute(&self, query: StructuredQuery, blocking_k: usize) -> Vec<SearchHit> {
+    pub fn execute(&self, query: StructuredQuery, _blocking_k: usize) -> Vec<SearchHit> {
+        info!("[SEARCH] Starting search execution");
+        let search_timer = Timer::new("SearchEngine::execute");
+        
+        // ROUND 1: Use DISTINCTIVE tokens to find candidates
+        info!("[SEARCH] ROUND 1: Finding candidates using distinctive tokens");
+        let round1_timer = Timer::new("Round1::FindCandidates");
+        
         let mut candidates = RoaringBitmap::new();
         let mut all_query_tokens: Vec<(RecordField, String)> = Vec::new();
 
-        for (field, text) in query.fields {
-            let tokens = tokenize(&text);
-            for token in tokens {
-                all_query_tokens.push((field, token.clone()));
-
-                if let Some(postings) = self.index.get_postings(field, &token) {
-                    if postings.len() <= blocking_k {
-                        candidates |= &postings.bitmap; 
-                    }
+        for (field, text) in &query.fields {
+            debug!("[SEARCH] Processing field {:?}: '{}'", field, text);
+            let token_set = tokenize_structured(text);
+            
+            info!("[SEARCH]   Field {:?} - Distinctive tokens: {}, All tokens: {}", 
+                  field, token_set.distinctive.len(), token_set.all.len());
+            
+            // Round 1: Union of distinctive tokens (any match qualifies)
+            for token in &token_set.distinctive {
+                if let Some(postings) = self.index.get_postings(*field, token) {
+                    let before = candidates.len();
+                    candidates |= &postings.bitmap;
+                    let after = candidates.len();
+                    debug!("[SEARCH]     Token '{}' added {} candidates (total: {} -> {})", 
+                           token, after - before, before, after);
                 }
+            }
+            
+            // Collect ALL tokens for Round 2 scoring
+            for token in token_set.all {
+                all_query_tokens.push((*field, token));
             }
         }
 
-        if candidates.is_empty() { return vec![]; }
+        drop(round1_timer);
+        info!("[SEARCH] ROUND 1 Complete: {} candidates found", candidates.len());
 
-        self.scorer
-            .score(candidates, &all_query_tokens, &self.index, &self.metadata)
+        if candidates.is_empty() { 
+            info!("[SEARCH] No candidates found, returning empty results");
+            return vec![]; 
+        }
+
+        // ROUND 2: Score candidates using ALL tokens (including weak n-grams)
+        info!("[SEARCH] ROUND 2: Scoring {} candidates with {} query tokens", 
+              candidates.len(), all_query_tokens.len());
+        
+        let round2_timer = Timer::new("Round2::ScoreCandidates");
+        let scored_results = self.scorer
+            .score(candidates, &all_query_tokens, &self.index, &self.metadata);
+        drop(round2_timer);
+        
+        info!("[SEARCH] Scored {} documents", scored_results.len());
+        
+        // Take top-k results
+        let final_results: Vec<SearchHit> = scored_results
             .into_iter()
             .take(query.top_k)
-            .map(|(doc_id, score)| SearchHit {doc_id, score})
-            .collect()
+            .map(|(doc_id, score)| {
+                debug!("[SEARCH] Result: doc_id={}, score={}", doc_id, score);
+                SearchHit {doc_id, score}
+            })
+            .collect();
+        
+        drop(search_timer);
+        info!("[SEARCH] Returning {} results", final_results.len());
+        
+        final_results
     }
 }
 
@@ -118,8 +163,6 @@ mod tests {
         };
 
         // 4. Perform Search
-        // Querying for "Mauriti" in "Belem". 
-        // Both records have "Mauriti", but only one has "Belem".
         let query = StructuredQuery {
             fields: vec![
                 (RecordField::Rua, "Mauriti".to_string()),
@@ -128,7 +171,6 @@ mod tests {
             top_k: 5,
         };
 
-        // blocking_k = 10 (tokens appearing in >10 docs are considered "common")
         let results = engine.execute(query, 10);
         
         println!("\nFinal Results returned to User:");

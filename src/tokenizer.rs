@@ -304,56 +304,73 @@ pub fn extract_weak_tokens(tokens: &HashSet<String>, n: usize) -> HashSet<String
     weak_tokens
 }
 
-pub fn tokenize(text: &str) -> HashSet<String> {
+pub struct TokenSet {
+    pub distinctive: HashSet<String>,  // For candidate filtering
+    pub all: HashSet<String>,           // For scoring
+}
+
+pub fn tokenize_structured(text: &str) -> TokenSet {
     let normalized: String = text
         .nfd()
         .filter(|c| !unicode_normalization::char::is_combining_mark(*c))
         .collect::<String>()
         .to_lowercase();
 
-    // 1. Initial Tokenization & Cleaning
     let mut tokens_list: Vec<String> = RE
         .find_iter(&normalized)
         .map(|m| m.as_str().to_string())
         .filter(|token| !STOP_WORDS_SET.contains(token.as_str()) && !NLTK_STOPS.contains(token))
         .collect();
 
-    // 2. State management (DDD: keeping domain rules explicit)
     if text.to_lowercase().contains("pará") {
         tokens_list.push("para".to_string());
     }
 
-    let mut final_tokens = HashSet::new();
+    let mut distinctive_tokens = HashSet::new();
+    let mut all_tokens = HashSet::new();
 
-    // 3. Process Strong Tokens (Contextual N-grams)
+    // Process Strong/Distinctive Tokens (N-grams, phrases)
     for window in tokens_list.windows(2) {
         let first = &window[0];
         let second = &window[1];
 
-        // Address types + number (e.g., "Rua 3")
         if ADDRESS_TYPE_SET.contains(first.as_str()) && RE_STREET_NUMBER.is_match(second) {
-            final_tokens.insert(format!("{} {}", first, second));
+            distinctive_tokens.insert(format!("{} {}", first, second));
         }
 
-        // Highway prefixes (e.g., "BR 101")
         if HIGHWAY_PREFIX_SET.contains(first.as_str()) && RE_SHORT_NUMBER.is_match(second) {
-            final_tokens.insert(format!("{} {}", first, second));
+            distinctive_tokens.insert(format!("{} {}", first, second));
         }
     }
 
-    // 4. Identity & Specialized Tokens
+    // Identity & Specialized Tokens (distinctive)
     for t in &tokens_list {
-        if RE_CEP.is_match(t) || RE_NUMBER.is_match(t) || UFS_SET.contains(t.as_str()) {
-            final_tokens.insert(t.clone());
+        if RE_CEP.is_match(t) || UFS_SET.contains(t.as_str()) {
+            distinctive_tokens.insert(t.clone());
         }
-        final_tokens.insert(t.clone()); // Add the base token
+        if RE_NUMBER.is_match(t) && t.len() >= 3 {
+            // House numbers are distinctive
+            distinctive_tokens.insert(t.clone());
+        }
+        all_tokens.insert(t.clone());
     }
 
-    // 5. Weak Tokens (N-Grams for fuzzy matching)
-    let weak_tokens = extract_weak_tokens(&final_tokens, 3);
-    final_tokens.extend(weak_tokens);
+    // Weak Tokens (for scoring only, not filtering)
+    let weak_tokens = extract_weak_tokens(&all_tokens, 3);
+    all_tokens.extend(weak_tokens);
+    
+    // Copy distinctive tokens to all_tokens
+    all_tokens.extend(distinctive_tokens.clone());
 
-    final_tokens
+    TokenSet {
+        distinctive: distinctive_tokens,
+        all: all_tokens,
+    }
+}
+
+// Keep the old function for backward compatibility
+pub fn tokenize(text: &str) -> HashSet<String> {
+    tokenize_structured(text).all
 }
 
 #[cfg(test)]
