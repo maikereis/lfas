@@ -9,6 +9,7 @@ pub struct FieldMetadata<F> {
     // field -> total_tokens_in_corpus (for avgdl calculation)
     pub total_field_lengths: HashMap<F, usize>,
     pub total_docs: usize,
+    pub term_df: HashMap<(F, String), usize>
 }
 
 impl<F> FieldMetadata<F>
@@ -20,6 +21,7 @@ where
             lengths: HashMap::new(),
             total_field_lengths: HashMap::new(),
             total_docs: 0,
+            term_df: HashMap::new(),
         }
     }
 }

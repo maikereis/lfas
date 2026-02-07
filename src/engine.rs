@@ -31,7 +31,7 @@ impl SearchEngine {
             
             info!("[SEARCH]   Field {:?} - Distinctive tokens: {}, All tokens: {}", 
                   field, token_set.distinctive.len(), token_set.all.len());
-            
+
             // Round 1: Union of distinctive tokens (any match qualifies)
             for token in &token_set.distinctive {
                 if let Some(postings) = self.index.get_postings(*field, token) {
@@ -46,6 +46,37 @@ impl SearchEngine {
             // Collect ALL tokens for Round 2 scoring
             for token in token_set.all {
                 all_query_tokens.push((*field, token));
+            }
+        }
+
+        // FALLBACK: If no distinctive tokens found candidates, use rarest tokens
+        if candidates.is_empty() && !all_query_tokens.is_empty() {
+            info!("[SEARCH] FALLBACK: No distinctive tokens found candidates, using rarest tokens");
+            
+            // Use pre-computed document frequency from metadata
+            let mut token_rareness: Vec<(&RecordField, &String, usize)> = Vec::new();
+            
+            for (field, token) in &all_query_tokens {
+                if let Some(&df) = self.metadata.term_df.get(&(*field, token.clone())) {
+                    token_rareness.push((field, token, df));
+                }
+            }
+            
+            // Sort by rarity (smallest document frequency = most selective)
+            token_rareness.sort_by_key(|(_, _, df)| *df);
+            
+            // Use up to 5 rarest tokens to build candidate set
+            let k_rarest = 5.min(token_rareness.len());
+            info!("[SEARCH] Using {} rarest tokens for fallback", k_rarest);
+            
+            for (field, token, df) in token_rareness.iter().take(k_rarest) {
+                if let Some(postings) = self.index.get_postings(**field, token) {
+                    let before = candidates.len();
+                    candidates |= &postings.bitmap;
+                    let after = candidates.len();
+                    info!("[SEARCH]   Fallback token '{}' (df={}) added {} candidates (total: {})", 
+                          token, df, after - before, after);
+                }
             }
         }
 
@@ -141,7 +172,11 @@ mod tests {
                 *metadata.total_field_lengths.entry(field).or_insert(0) += tokens.len();
 
                 for token in tokens {
-                    index.add_term(internal_id, field, token);
+                    index.add_term(internal_id, field, token.clone());
+                    
+                    // Track document frequency for fallback
+                    let key = (field, token);
+                    *metadata.term_df.entry(key).or_insert(0) += 1;
                 }
             }
         }
@@ -179,11 +214,25 @@ mod tests {
         assert!(!results_cep.is_empty(), "CEP search should return results");
         assert_eq!(results_cep[0].doc_id, 0, "Should find address with matching CEP");
 
-        // 5. Test with Municipio + Number (creates distinctive token)
-        // Note: Pure city name searches won't work in the two-round architecture
-        // because city names are not distinctive tokens. We need to combine with
-        // something distinctive like a house number.
-        println!("\n=== Test 2: Municipio + Number Search ===");
+        // 5. Test with Municipio only (should use fallback)
+        println!("\n=== Test 2: Municipio Only (Fallback) ===");
+        let query_municipio_only = StructuredQuery {
+            fields: vec![
+                (RecordField::Municipio, "Belem".to_string()),
+            ],
+            top_k: 5,
+        };
+
+        let results_municipio_only = engine.execute(query_municipio_only, 10);
+        println!("Municipio Only Search Results:");
+        for (i, hit) in results_municipio_only.iter().enumerate() {
+            println!("{}. Document {} (Score: {})", i + 1, hit.doc_id, hit.score);
+        }
+        assert!(!results_municipio_only.is_empty(), "Municipio search should return results via fallback");
+        assert_eq!(results_municipio_only[0].doc_id, 0, "Should find Belem address");
+
+        // 6. Test with Municipio + Number (creates distinctive token)
+        println!("\n=== Test 3: Municipio + Number Search ===");
         let query_municipio = StructuredQuery {
             fields: vec![
                 (RecordField::Municipio, "Belem".to_string()),
@@ -200,8 +249,8 @@ mod tests {
         assert!(!results_municipio.is_empty(), "Municipio + Number search should return results");
         assert_eq!(results_municipio[0].doc_id, 0, "Should find address with Belem and 31");
 
-        // 6. Test with combined query including a distinctive token (number)
-        println!("\n=== Test 3: Combined Search (Rua + Municipio + Number) ===");
+        // 7. Test with combined query including a distinctive token (number)
+        println!("\n=== Test 4: Combined Search (Rua + Municipio + Number) ===");
         let query_combined = StructuredQuery {
             fields: vec![
                 (RecordField::Rua, "Mauriti".to_string()),      // Common (not distinctive)

@@ -154,7 +154,11 @@ impl PySearchEngine {
             field_count += 1;
 
             for token in tokens {
-                self.inner.index.add_term(doc_id, field, token);
+                self.inner.index.add_term(doc_id, field, token.clone());
+
+                // Track document frequency
+                let key = (field, token);
+                *self.inner.metadata.term_df.entry(key).or_insert(0) += 1;
             }
 
             self.inner.metadata.lengths.entry(doc_id).or_default().insert(field, this_field_tokens);
