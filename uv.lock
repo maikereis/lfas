@@ -197,11 +197,19 @@ dependencies = [
     { name = "streamlit" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "maturin" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "maturin", specifier = ">=1.11.5" },
     { name = "streamlit", specifier = ">=1.54.0" },
 ]
+
+[package.metadata.requires-dev]
+dev = [{ name = "maturin", specifier = ">=1.7.4" }]
 
 [[package]]
 name = "markupsafe"

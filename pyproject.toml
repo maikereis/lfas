@@ -16,10 +16,7 @@ packages = ["src/lfas"]
 requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
-[tool.maturin]
-features = ["pyo3"]
-
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "maturin>=1.7.4",
 ]
