@@ -114,6 +114,8 @@ if uploaded_file:
                 )
                 
                 batch_start = time.time()
+        
+        engine.flush()
 
         # Final update
         progress_bar.progress(1.0)

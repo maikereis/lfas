@@ -1,6 +1,6 @@
-use std::time::{Duration, Instant};
+use log::info;
 use std::collections::HashMap;
-use log::{info};
+use std::time::{Duration, Instant};
 
 /// Simple performance timer for measuring operation durations
 #[derive(Debug)]

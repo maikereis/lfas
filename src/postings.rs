@@ -1,8 +1,9 @@
 use crate::DocId;
 use roaring::RoaringBitmap;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Postings {
     pub bitmap: RoaringBitmap,
     // Term Frequency statistic: DocId -> Count

@@ -305,8 +305,8 @@ pub fn extract_weak_tokens(tokens: &HashSet<String>, n: usize) -> HashSet<String
 }
 
 pub struct TokenSet {
-    pub distinctive: HashSet<String>,  // For candidate filtering
-    pub all: HashSet<String>,           // For scoring
+    pub distinctive: HashSet<String>, // For candidate filtering
+    pub all: HashSet<String>,         // For scoring
 }
 
 pub fn tokenize_structured(text: &str) -> TokenSet {
@@ -358,7 +358,7 @@ pub fn tokenize_structured(text: &str) -> TokenSet {
     // Weak Tokens (for scoring only, not filtering)
     let weak_tokens = extract_weak_tokens(&all_tokens, 3);
     all_tokens.extend(weak_tokens);
-    
+
     // Copy distinctive tokens to all_tokens
     all_tokens.extend(distinctive_tokens.clone());
 
@@ -382,7 +382,10 @@ mod tests {
         let input = "Pará, Belém, Travessa Mauriti, 31, 67000-000, PA, Rua 3, BR-010, km 8";
         let tokens = tokenize(input);
 
-        assert!(tokens.contains(&"para".to_string()));
+        assert!(
+            tokens.contains(&"para".to_string()),
+            "Should contain 'para'"
+        );
     }
 
     #[test]
@@ -390,7 +393,10 @@ mod tests {
         let input = "Pará, Belém, Travessa Mauriti, 31, 67000-000, PA, Rua 3, BR-010, km 8";
         let tokens = tokenize(input);
 
-        assert!(tokens.contains(&"67000-000".to_string()));
+        assert!(
+            tokens.contains(&"67000-000".to_string()),
+            "Should contain CEP"
+        );
     }
 
     #[test]
@@ -398,7 +404,6 @@ mod tests {
         let input = "Pará, Belém, Travessa Mauriti, 31, 67000-000, PA, Rua 3, BR-010, km 8";
         let tokens = tokenize(input);
 
-        // Should remove 'travessa', lowercase 'belem', and keep '31'
         assert!(tokens.contains(&"belem".to_string()));
         assert!(tokens.contains(&"mauriti".to_string()));
         assert!(tokens.contains(&"31".to_string()));
@@ -410,9 +415,10 @@ mod tests {
         let input = "Rodovia BR-316";
         let tokens = tokenize(input);
 
-        // Ensure "br 316" is captured as a strong token even with the hyphen
-        // Note that current regex \d+|[a-z]+ splits "BR-316" into ["br", "316"]
-        assert!(tokens.contains(&"br 316".to_string()));
+        assert!(
+            tokens.contains(&"br 316".to_string()),
+            "Should contain 'br 316'"
+        );
     }
 
     #[test]
@@ -420,7 +426,6 @@ mod tests {
         let input = "Rua Rua Rua 10";
         let tokens = tokenize(input);
 
-        // Count occurrences of 'rua'
         let count = tokens.iter().filter(|t| *t == "rua").count();
         assert_eq!(count, 1, "Tokens should be unique (HashSet)");
     }
@@ -430,8 +435,24 @@ mod tests {
         let input = "ABC";
         let tokens = tokenize(input);
 
-        // "abc" should exist, but if it's too short,
-        // we might not want it to generate further weak tokens.
         assert!(tokens.contains(&"abc".to_string()));
+    }
+
+    #[test]
+    fn test_distinctive_vs_all_tokens() {
+        let token_set = tokenize_structured("Travessa 123 Belém");
+
+        assert!(
+            token_set.distinctive.contains(&"123".to_string()),
+            "Number should be distinctive"
+        );
+        assert!(
+            token_set.distinctive.contains(&"travessa 123".to_string()),
+            "N-gram should be distinctive"
+        );
+
+        assert!(token_set.all.contains(&"123".to_string()));
+        assert!(token_set.all.contains(&"belem".to_string()));
+        assert!(token_set.all.contains(&"travessa".to_string()));
     }
 }

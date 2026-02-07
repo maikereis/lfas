@@ -1,6 +1,7 @@
 use std::io;
 
 use lfas::index::InvertedIndex;
+use lfas::storage::InMemoryStorage;
 use lfas::tokenizer::tokenize;
 use lfas::{Record, RecordField};
 
@@ -21,7 +22,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rdr = csv::Reader::from_reader(io::stdin());
 
     // F is now RecordField, DocId is usize
-    let mut idx: InvertedIndex<RecordField> = InvertedIndex::new();
+    let storage = InMemoryStorage::new();
+    let mut idx: InvertedIndex<RecordField, InMemoryStorage<RecordField>> =
+        InvertedIndex::new(storage);
     let mut id_map: Vec<String> = Vec::new();
 
     for result in rdr.deserialize::<Record>().take(100000) {
@@ -45,7 +48,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bm_sao = idx.term_bitmap(RecordField::Municipio, "sao");
     let bm_do = idx.term_bitmap(RecordField::Municipio, "capim");
 
-    let intersection = InvertedIndex::<RecordField>::intersect(&[bm_sao, bm_do]);
+    let intersection =
+        InvertedIndex::<RecordField, InMemoryStorage<RecordField>>::intersect(&[bm_sao, bm_do]);
     println!("{:?}", intersection);
 
     Ok(())
