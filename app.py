@@ -1,19 +1,21 @@
-import streamlit as st
-import pandas as pd
-from lfas import PySearchEngine
-import time
-import logging
 import sys
+import logging
 
-# Configure Python logging to capture Rust logs via pyo3-log
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
+
+
+import time
+import pandas as pd
+import streamlit as st
+
+
+from lfas import PySearchEngine
+PySearchEngine.init_logging()
 
 st.set_page_config(page_title="LFAS Pro", page_icon="⚡", layout="wide")
 st.title("LFAS: High-Performance Address Search")

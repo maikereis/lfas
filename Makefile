@@ -13,6 +13,12 @@ all: build
 build:
 	$(CARGO) build
 
+develop:
+	maturin develop
+
+release:
+	maturin delevop --release
+
 ## Run: Run the main application (expects CSV data via stdin as per your main.rs)
 run:
 	$(CARGO) run

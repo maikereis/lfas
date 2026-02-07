@@ -29,7 +29,12 @@ where
     }
 
     pub fn get_postings(&self, field: F, term: &str) -> Option<&Postings> {
-        self.postings.get(&(field, term.to_string()))
+        use log::debug;
+        let result = self.postings.get(&(field, term.to_string()));
+        if let Some(postings) = result {
+            debug!("[INDEX] Found {} docs for term '{}'", postings.len(), term);
+        }
+        result
     }
 
     pub fn term_bitmap(&self, field: F, term: &str) -> RoaringBitmap {

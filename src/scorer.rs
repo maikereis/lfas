@@ -19,6 +19,14 @@ where
         index: &InvertedIndex<F>,
         metadata: &FieldMetadata<F>,
     ) -> Vec<(DocId, f32)> {
+        use log::{info};
+        use crate::timing::Timer;
+        
+        let _timer = Timer::new("BM25FScorer::score");
+        
+        info!("[SCORER] Scoring {} candidates with {} query tokens", 
+              matches.len(), query_tokens.len());
+        
         let mut scores = Vec::new();
         let avg_lengths = self.calculate_avg_lengths(metadata);
 
@@ -48,6 +56,11 @@ where
         }
 
         scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        
+        info!("[SCORER] Scored {} documents, top score: {:.2}", 
+              scores.len(), 
+              scores.first().map(|(_, s)| *s).unwrap_or(0.0));
+        
         scores
     }
 

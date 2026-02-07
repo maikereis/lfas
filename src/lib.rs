@@ -85,6 +85,13 @@ pub struct PySearchEngine {
 
 #[pymethods]
 impl PySearchEngine {
+    #[staticmethod]
+    fn init_logging() {
+        // Use try_init() and discard the result to avoid panicking 
+        // if Streamlit re-runs this script.
+        let _ = pyo3_log::try_init();
+    }
+
     #[new]
     fn new() -> Self {
         info!("[RUST] PySearchEngine::new() called");
@@ -115,10 +122,15 @@ impl PySearchEngine {
     }
 
     fn index_dict(&mut self, doc_id: usize, record_dict: HashMap<String, String>) {
-        // Log every 10000 documents
+        
+        // Log every 10000 documents with timing
         if doc_id % 10000 == 0 {
-            info!("[RUST] Indexing doc_id: {}", doc_id);
+            info!("[RUST] Indexing doc_id: {} (Total docs: {})", 
+                  doc_id, self.inner.metadata.total_docs);
         }
+        
+        let mut field_count = 0;
+        let mut token_count = 0;
         
         for (key, text) in record_dict {
             let field = match key.to_lowercase().as_str() {
@@ -137,18 +149,25 @@ impl PySearchEngine {
 
             // Use ALL tokens (including weak ones) for indexing
             let tokens = tokenize(&text);
-            let token_count = tokens.len();
+            let this_field_tokens = tokens.len();
+            token_count += this_field_tokens;
+            field_count += 1;
 
             for token in tokens {
                 self.inner.index.add_term(doc_id, field, token);
             }
 
-            self.inner.metadata.lengths.entry(doc_id).or_default().insert(field, token_count);
-            *self.inner.metadata.total_field_lengths.entry(field).or_insert(0) += token_count;
+            self.inner.metadata.lengths.entry(doc_id).or_default().insert(field, this_field_tokens);
+            *self.inner.metadata.total_field_lengths.entry(field).or_insert(0) += this_field_tokens;
         }
 
         if doc_id >= self.inner.metadata.total_docs {
             self.inner.metadata.total_docs = doc_id + 1;
+        }
+        
+        // Log details for first document
+        if doc_id == 0 {
+            info!("[INDEX] First doc indexed: {} fields, {} tokens", field_count, token_count);
         }
     }
 
@@ -234,10 +253,11 @@ impl PySearchEngine {
 #[pymodule]
 fn lfas(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Initialize pyo3-log to bridge Rust logging to Python
-    info!("[RUST] Registering lfas module");
-    pyo3_log::init();
+    //info!("[RUST] Registering lfas module");
+    //pyo3_log::init();
     
     info!("[RUST] PySearchEngine class registered");
     m.add_class::<PySearchEngine>()?;
+
     Ok(())
 }
