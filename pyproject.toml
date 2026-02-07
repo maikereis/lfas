@@ -9,12 +9,13 @@ dependencies = [
     "streamlit>=1.54.0",
 ]
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/lfas"]
-
 [build-system]
 requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
+
+[tool.maturin]
+module-name = "lfas"
+features = ["pyo3/extension-module"]
 
 [dependency-groups]
 dev = [
