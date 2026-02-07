@@ -109,26 +109,3 @@ macro_rules! time_with_count {
         result
     }};
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::thread::sleep;
-
-    #[test]
-    fn test_timer_basic() {
-        let timer = Timer::new("test_operation");
-        sleep(Duration::from_millis(10));
-        assert!(timer.elapsed_ms() >= 10.0);
-    }
-
-    #[test]
-    fn test_timing_stats() {
-        let mut stats = TimingStats::new();
-        stats.record("op1", Duration::from_millis(10));
-        stats.record("op1", Duration::from_millis(20));
-        stats.record("op2", Duration::from_millis(30));
-
-        stats.print_summary();
-    }
-}

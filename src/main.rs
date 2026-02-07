@@ -1,27 +1,12 @@
-use std::io;
-
 use lfas::index::InvertedIndex;
 use lfas::storage::InMemoryStorage;
 use lfas::tokenizer::tokenize;
 use lfas::{Record, RecordField};
-
-//fn read_csv(n_rows: usize)-> Result<(), Box<dyn Error>> {
-//    let mut rdr = csv::Reader::from_reader(io::stdin());
-//    for result in rdr.deserialize().take(n_rows) {
-//        let record: Record = result?;
-//        println!("{:?}", record);
-//    }
-//    Ok(())
-//}
+use std::io;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    //if let Err(err) = read_csv(1000) {
-    //    println!("error running example: {}", err);
-    //}
-
     let mut rdr = csv::Reader::from_reader(io::stdin());
 
-    // F is now RecordField, DocId is usize
     let storage = InMemoryStorage::new();
     let mut idx: InvertedIndex<RecordField, InMemoryStorage<RecordField>> =
         InvertedIndex::new(storage);
@@ -35,7 +20,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         for (field_enum, text) in record.fields() {
             for token in tokenize(text) {
-                // field_enum is RecordField, matching the index type
                 idx.add_term(internal_id, field_enum, token);
             }
         }

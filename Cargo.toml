@@ -29,6 +29,10 @@ unicode-normalization = "0.1.25"
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
 
+[features]
+default = ["python"]
+python = []
+
 [[bench]]
 name = "index_benchmark"
 harness = false

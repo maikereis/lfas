@@ -36,7 +36,6 @@ where
             num_candidates as u64 * num_tokens as u64
         );
 
-        // Timer para avg_lengths
         let avg_timer = Timer::new("calculate_avg_lengths");
         let avg_lengths = self.calculate_avg_lengths(metadata);
         drop(avg_timer);
@@ -46,7 +45,6 @@ where
             avg_lengths.len()
         );
 
-        // Pre-calcular IDFs para evitar recalcular
         let idf_timer = Timer::new("precalculate_idfs");
         let mut idf_cache = std::collections::HashMap::new();
         for (field, term) in query_tokens {
@@ -60,7 +58,6 @@ where
 
         debug!("[SCORER] Pre-calculated {} IDF values", idf_cache.len());
 
-        // Scoring loop
         let scoring_timer = Timer::new("score_documents");
         let mut scores = Vec::with_capacity(num_candidates as usize);
 
@@ -92,7 +89,6 @@ where
                             .unwrap_or(&0) as f32;
                         let avgdl = *avg_lengths.get(field).unwrap_or(&1.0);
 
-                        // Field-aware contribution
                         weighted_tf = (tf as f32 * weight) / (1.0 + b * (dl / avgdl - 1.0));
                     } else {
                         freq_misses += 1;
@@ -131,7 +127,6 @@ where
             }
         );
 
-        // Sorting
         let sort_timer = Timer::new("sort_results");
         scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         drop(sort_timer);
@@ -168,11 +163,9 @@ where
     {
         use log::debug;
 
-        // Collect document frequency across all fields (union of bitmaps)
         let mut df_bitmap = RoaringBitmap::new();
         let mut fields_found = 0;
 
-        // Use the storage iterator instead of accessing postings directly
         for result in index.storage.iter() {
             if let Ok(((_, t), postings)) = result {
                 if t == term {
