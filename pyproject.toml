@@ -9,6 +9,17 @@ dependencies = [
     "streamlit>=1.54.0",
 ]
 
+[tool.hatch.build.targets.wheel]
+packages = ["src/lfas"]
+
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+features = ["pyo3"]
+
+[tool.uv]
+dev-dependencies = [
+    "maturin>=1.7.4",
+]
