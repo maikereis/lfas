@@ -23,6 +23,7 @@ regex = "1.12.3"
 roaring = { version = "0.11.3", features = ["serde"]}
 serde = { version = "1.0.228", features = ["derive"] }
 stopwords = "0.1.1"
+tempfile = "3.24.0"
 unicode-normalization = "0.1.25"
 
 [dev-dependencies]
@@ -34,4 +35,16 @@ harness = false
 
 [[bench]]
 name = "search_benchmark"
+harness = false
+
+[[bench]]
+name = "concurrency_benchmark"
+harness = false
+
+[[bench]]
+name = "persistance_benchmark"
+harness = false
+
+[[bench]]
+name = "tokenizer_benchmark"
 harness = false

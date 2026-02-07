@@ -55,6 +55,7 @@ impl Record {
     }
 }
 
+#[derive(Hash, Eq, PartialEq, Clone, Debug, serde::Deserialize)]
 pub struct StructuredQuery<F> {
     pub fields: Vec<(F, String)>,
     pub top_k: usize,

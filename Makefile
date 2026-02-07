@@ -38,6 +38,19 @@ bench-index:
 bench-search:
 	$(CARGO) bench --bench search_benchmark
 
+# Shortcut for storage benchmarks
+bench-storage:
+	$(CARGO) bench --bench storage_benchmark
+
+# Shortcut for concurrency benchmarks
+bench-concurrency:
+	$(CARGO) bench --bench concurrency_benchmark
+
+# Shortcut for tokenizer benchmarks
+bench-tokenizer:
+	$(CARGO) bench --bench tokenizer_benchmark
+
+
 ## Check: Run clippy for linting and static analysis (Essential for Rust learners!)
 check:
 	$(CARGO) clippy -- -D warnings
