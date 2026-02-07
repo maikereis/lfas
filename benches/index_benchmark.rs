@@ -8,12 +8,20 @@ use lfas::tokenizer::tokenize;
 fn setup_benchmark_data() -> (InvertedIndex<RecordField>, Vec<String>) {
     let mut idx = InvertedIndex::new();
     // Simulate 1000 documents to get dense enough bitmaps
+    // Use tokenize() to ensure all tokens (including n-grams) are indexed
     for i in 0..1000 {
-        idx.add_term(i, RecordField::Municipio, "belem".to_string());
+        // Index all tokens from "belem" including n-grams
+        for token in tokenize("belem") {
+            idx.add_term(i, RecordField::Municipio, token);
+        }
         if i % 2 == 0 {
-            idx.add_term(i, RecordField::Rua, "mauriti".to_string());
+            // Index all tokens from "mauriti" including n-grams
+            for token in tokenize("mauriti") {
+                idx.add_term(i, RecordField::Rua, token);
+            }
         }
     }
+    // Return base tokens for bitmap retrieval
     (idx, vec!["belem".to_string(), "mauriti".to_string()])
 }
 
@@ -60,6 +68,7 @@ fn bench_indexing(c: &mut Criterion) {
             let mut idx: InvertedIndex<RecordField> = InvertedIndex::new();
             for (i, record) in records.iter().enumerate() {
                 for (field, text) in record.fields() {
+                    // Use tokenize() which returns ALL tokens including n-grams
                     for token in tokenize(text) {
                         // black_box ensures the compiler doesn't optimize away the work
                         idx.add_term(black_box(i), black_box(field), black_box(token));

@@ -37,10 +37,14 @@ fn build_fake_engine(size: usize) -> SearchEngine {
         ];
 
         for (field, text) in fields {
-            let tokens = tokenize(&text);
-            doc_entry.insert(field, tokens.len());
-            *metadata.total_field_lengths.entry(field).or_insert(0) += tokens.len();
-            for token in tokens {
+            // Use tokenize() to get ALL tokens including n-grams
+            let all_tokens: Vec<String> = tokenize(&text).into_iter().collect();
+            let token_count = all_tokens.len();
+            
+            doc_entry.insert(field, token_count);
+            *metadata.total_field_lengths.entry(field).or_insert(0) += token_count;
+            
+            for token in all_tokens {
                 index.add_term(i, field, token);
             }
         }
@@ -50,12 +54,18 @@ fn build_fake_engine(size: usize) -> SearchEngine {
     // We manually add a unique token to the very last document
     let unique_token = "zyxwvut_unique".to_string();
     let target_doc_id = size - 1;
-    index.add_term(target_doc_id, RecordField::Rua, unique_token);
-    // Update metadata for that field to account for the extra token
-    if let Some(doc_fields) = metadata.lengths.get_mut(&target_doc_id) {
-        *doc_fields.entry(RecordField::Rua).or_insert(0) += 1;
+    
+    // Index the unique token with all its n-grams
+    for token in tokenize(&unique_token) {
+        index.add_term(target_doc_id, RecordField::Rua, token);
     }
-    *metadata.total_field_lengths.entry(RecordField::Rua).or_insert(0) += 1;
+    
+    // Update metadata for that field to account for the extra tokens
+    if let Some(doc_fields) = metadata.lengths.get_mut(&target_doc_id) {
+        let unique_token_count = tokenize(&unique_token).len();
+        *doc_fields.entry(RecordField::Rua).or_insert(0) += unique_token_count;
+        *metadata.total_field_lengths.entry(RecordField::Rua).or_insert(0) += unique_token_count;
+    }
 
     let mut field_weights = HashMap::new();
     field_weights.insert(RecordField::Rua, 2.0);
@@ -93,6 +103,7 @@ fn bench_fake_load(c: &mut Criterion) {
     });
 
     // 2. Common Term: High Bitmap Density
+    // Note: "street" is a common English word that should appear in many fake street names
     group.bench_function("common_term_search", |b| {
         b.iter(|| {
             let query = StructuredQuery {

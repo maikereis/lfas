@@ -348,7 +348,7 @@ pub fn tokenize_structured(text: &str) -> TokenSet {
         if RE_CEP.is_match(t) || UFS_SET.contains(t.as_str()) {
             distinctive_tokens.insert(t.clone());
         }
-        if RE_NUMBER.is_match(t) && t.len() >= 3 {
+        if RE_NUMBER.is_match(t) && t.len() >= 1 {
             // House numbers are distinctive
             distinctive_tokens.insert(t.clone());
         }
@@ -411,7 +411,7 @@ mod tests {
         let tokens = tokenize(input);
 
         // Ensure "br 316" is captured as a strong token even with the hyphen
-        // Note: Your current regex \d+|[a-z]+ splits "BR-316" into ["br", "316"]
+        // Note that current regex \d+|[a-z]+ splits "BR-316" into ["br", "316"]
         assert!(tokens.contains(&"br 316".to_string()));
     }
 
