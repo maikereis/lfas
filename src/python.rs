@@ -3,9 +3,12 @@ use crate::storage::PostingsStorage;
 use crate::timing::Timer;
 use crate::tokenizer::tokenize;
 use crate::{RecordField, StructuredQuery, engine::SearchEngine, storage::LmdbStorage};
+use bincode::{deserialize_from, serialize_into};
 use log::{debug, info};
 use pyo3::prelude::*;
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufReader, BufWriter};
 
 #[pyclass]
 pub struct PySearchEngine {
@@ -234,6 +237,21 @@ impl PySearchEngine {
 
     fn get_stats(&self) -> String {
         format!("Total docs indexed: {}", self.inner.metadata.total_docs)
+    }
+
+    fn save_metadata(&self, path: &str) -> PyResult<()> {
+        let file = File::create(path)?;
+        let writer = BufWriter::new(file);
+        serialize_into(writer, &self.inner.metadata)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))
+    }
+    
+    fn load_metadata(&mut self, path: &str) -> PyResult<()> {
+        let file = File::open(path)?;
+        let reader = BufReader::new(file);
+        self.inner.metadata = deserialize_from(reader)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+        Ok(())
     }
 }
 

@@ -1,9 +1,15 @@
+use serde::{Deserialize, Serialize};
+
 use crate::DocId;
 use std::collections::HashMap;
 use std::hash::Hash;
 
 /// Keeps track of document lengths and global field stats.
-pub struct FieldMetadata<F> {
+#[derive(Serialize, Deserialize)]
+pub struct FieldMetadata<F> 
+where 
+    F: Hash + Eq + Clone
+{
     /// doc_id -> field -> length
     pub lengths: HashMap<DocId, HashMap<F, usize>>,
     /// field -> total_tokens_in_corpus (for avgdl calculation)
