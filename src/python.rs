@@ -77,7 +77,10 @@ impl PySearchEngine {
 
         // Batch writing to Storage
         // Now we only perform ONE read and ONE write per single term in the batch
-        for ((field, term), doc_ids) in batch_accumulator {
+        for ((field, term), mut doc_ids) in batch_accumulator {
+            doc_ids.sort_unstable();
+            doc_ids.dedup();
+            
             let mut postings = self.inner.index.storage.get(field, &term)
                 .unwrap_or_default()
                 .unwrap_or_else(crate::postings::Postings::new);
@@ -86,7 +89,11 @@ impl PySearchEngine {
                 postings.add_doc(id);
             }
             
-            // The LmdbStorage you have already has a WriteBuffer,
+            
+            let key = (field, term.clone());
+            self.inner.metadata.term_df.insert(key, postings.len());
+            
+            // The LmdbStorage we have already has a WriteBuffer,
             // so this will be extremely fast.
             self.inner.index.storage.put(field, term, postings).unwrap();
         }

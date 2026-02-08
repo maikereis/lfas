@@ -1,5 +1,6 @@
 use crate::{DocId, index::InvertedIndex, metadata::FieldMetadata, storage::PostingsStorage};
 use roaring::RoaringBitmap;
+use std::collections::HashMap;
 
 pub struct BM25FScorer<F> {
     pub k1: f32,
@@ -46,11 +47,11 @@ where
         );
 
         let idf_timer = Timer::new("precalculate_idfs");
-        let mut idf_cache = std::collections::HashMap::new();
+        let mut idf_cache = HashMap::new();
         for (field, term) in query_tokens {
             let key = (*field, term.as_str());
             if !idf_cache.contains_key(&key) {
-                let idf = self.calculate_idf(term, index, metadata.total_docs);
+                let idf = self.calculate_idf(term, *field, metadata);
                 idf_cache.insert(key, idf);
             }
         }
@@ -157,32 +158,17 @@ where
             .collect()
     }
 
-    fn calculate_idf<S>(&self, term: &str, index: &InvertedIndex<F, S>, total_docs: usize) -> f32
-    where
-        S: PostingsStorage<F>,
-    {
-        use log::debug;
+    fn calculate_idf(
+        &self, 
+        term: &str, 
+        field: F, 
+        metadata: &FieldMetadata<F>
+    ) -> f32 {
+        // O(1) Lookup replaced the expensive storage iteration
+        let df = metadata.get_df(&field, term) as f32;
+        let total_docs = metadata.total_docs as f32;
 
-        let mut df_bitmap = RoaringBitmap::new();
-        let mut fields_found = 0;
-
-        for result in index.storage.iter() {
-            if let Ok(((_, t), postings)) = result {
-                if t == term {
-                    df_bitmap |= &postings.bitmap;
-                    fields_found += 1;
-                }
-            }
-        }
-
-        let df = df_bitmap.len() as f32;
-        let idf = ((total_docs as f32 - df + 0.5) / (df + 0.5) + 1.0).ln();
-
-        debug!(
-            "[IDF] term='{}': total_df={}, fields={}, idf={:.4}",
-            term, df, fields_found, idf
-        );
-
-        idf
+        // Standard BM25 IDF formula
+        ((total_docs - df + 0.5) / (df + 0.5) + 1.0).ln()
     }
 }

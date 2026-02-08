@@ -32,6 +32,10 @@ where
             term_df: HashMap::new(),
         }
     }
+
+    pub fn get_df(&self, field: &F, term: &str) -> usize {
+        self.term_df.get(&(field.clone(), term.to_string())).cloned().unwrap_or(0)
+    }
 }
 
 impl<F> Default for FieldMetadata<F>
