@@ -1,2 +1,7 @@
 [server]
 maxUploadSize = 2000 # Sets limit to 2GB
+folderWatchBlacklist = [
+  "target",
+  ".git",
+  "__pycache__"
+]

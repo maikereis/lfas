@@ -24,4 +24,18 @@ where
 
     /// Iterate over all postings (useful for metadata computation)
     fn iter(&self) -> Box<dyn Iterator<Item = Result<((F, String), Postings), Self::Error>> + '_>;
+
+    /// Zero-copy streaming iteration via callback
+    /// Avoids collecting all results into memory
+    fn scan<E>(
+        &self,
+        callback: impl FnMut(F, &str, &[u8]) -> Result<(), E>,
+    ) -> Result<(), Self::Error>
+    where
+        E: std::fmt::Display;
+
+    /// Flush buffered writes to persistent storage (optional, no-op for in-memory)
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }

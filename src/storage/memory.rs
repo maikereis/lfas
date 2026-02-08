@@ -56,4 +56,26 @@ where
                 .map(|((f, t), p)| Ok(((*f, t.clone()), p.clone()))),
         )
     }
+
+    fn scan<E>(
+        &self,
+        mut callback: impl FnMut(F, &str, &[u8]) -> Result<(), E>,
+    ) -> Result<(), Self::Error>
+    where
+        E: std::fmt::Display,
+    {
+        // For in-memory storage, we serialize each posting and call the callback
+        for ((field, term), postings) in &self.data {
+            // Serialize the postings to bytes
+            let bytes = bincode::serialize(postings).unwrap();
+            // Call the callback - if it fails, we ignore it since Error is Infallible
+            let _ = callback(*field, term, &bytes);
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        // No-op for in-memory storage
+        Ok(())
+    }
 }

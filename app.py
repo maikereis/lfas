@@ -89,7 +89,7 @@ if uploaded_file:
         # Performance metrics
         start_time = time.time()
         batch_start = start_time
-        batch_size = 10000
+        batch_size = 10_000
         
         records = df.to_dict('records')
         
