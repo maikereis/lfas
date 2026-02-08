@@ -8,6 +8,11 @@ use std::hash::Hash;
 use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::Mutex;
+use once_cell::sync::Lazy;
+
+
+static OPEN_ENVS: Lazy<Mutex<std::collections::HashSet<std::path::PathBuf>>> = 
+    Lazy::new(|| Mutex::new(std::collections::HashSet::new()));
 
 pub const BATCH_SIZE: usize = 100_000;
 pub const MAP_SIZE: usize = 10 * 1024 * 1024 * 1024; // 10GB
@@ -159,6 +164,18 @@ where
 
     pub fn open_with_batch_size(path: &Path, batch_size: usize) -> Result<Self, heed::Error> {
         create_dir_all(path)?;
+        
+        let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        {
+            let mut envs = OPEN_ENVS.lock().unwrap();
+            if envs.contains(&canonical_path) {
+                return Err(heed::Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("LMDB environment at {:?} is already open", canonical_path)
+                )));
+            }
+            envs.insert(canonical_path.clone());
+        }
 
         let env = unsafe {
             EnvOpenOptions::new()
@@ -251,5 +268,11 @@ where
 {
     fn drop(&mut self) {
         let _ = self.flush();
+        
+        // Remove from tracking
+        if let Ok(path) = self.env.path().canonicalize() {
+            let mut envs = OPEN_ENVS.lock().unwrap();
+            envs.remove(&path);
+        }
     }
 }
