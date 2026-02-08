@@ -2,6 +2,7 @@ use crate::DocId;
 use crate::postings::Postings;
 use crate::storage::PostingsStorage;
 use roaring::RoaringBitmap;
+use std::collections::HashMap;
 use std::hash::Hash;
 use std::marker::PhantomData;
 
@@ -36,6 +37,31 @@ where
         postings.add_doc(id);
 
         self.storage.put(field, term, postings).unwrap();
+    }
+
+    pub fn add_batch(&mut self, batch: Vec<(DocId, Vec<(F, String)>)>) {
+        // We aggregate all the terms of the batch into memory first.
+        // This avoids the constant Get-Modify-Put in LMDB.
+        let mut temp_map: HashMap<(F, String), RoaringBitmap> = HashMap::new();
+
+        for (id, fields) in batch {
+            for (field, term) in fields {
+                temp_map.entry((field, term))
+                    .or_default()
+                    .insert(id as u32);
+            }
+        }
+
+        // Now we merge with storage only once per single term.
+        for ((field, term), new_bitmap) in temp_map {
+            let mut postings = self.storage
+                .get(field, &term)
+                .unwrap_or_default()
+                .unwrap_or_else(Postings::new);
+                
+            postings.bitmap |= new_bitmap; // Operação de união de bitmaps (veloz)
+            self.storage.put(field, term, postings).unwrap();
+        }
     }
 
     pub fn get_postings(&self, field: F, term: &str) -> Option<Postings> {

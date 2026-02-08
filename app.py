@@ -51,6 +51,9 @@ if 'log_handler' not in st.session_state:
 with st.sidebar:
     uploaded_file = st.file_uploader("Upload CSV", type="csv")
     top_k = st.number_input("Top K", value=10, min_value=1, max_value=100)
+    blocking_k = st.number_input("Blocking K", value=1000, min_value=100, max_value=100_000)
+
+    blocking_k
     
     # Debug info
     if st.session_state['engine'] is not None:
@@ -88,39 +91,43 @@ if uploaded_file:
         
         # Performance metrics
         start_time = time.time()
-        batch_start = start_time
-        batch_size = 10_000
-        
-        records = df.to_dict('records')
+        chunk_size = 100_000
         
         # Clear previous logs
         log_handler.logs.clear()
-        
-        for i, row in enumerate(records):
-            clean_record = {k: str(v) for k, v in row.items() if pd.notna(v)}
-            engine.index_dict(i, clean_record)
-            
-            # Update UI every batch
-            if i > 0 and i % batch_size == 0:
-                batch_time = time.time() - batch_start
-                docs_per_sec = batch_size / batch_time
-                
-                progress_bar.progress(i / total_rows)
-                status_text.text(f"Processed {i:,} / {total_rows:,} records...")
-                timing_container.metric(
-                    "Indexing Speed", 
-                    f"{docs_per_sec:,.0f} docs/sec",
-                    f"{batch_time:.2f}s for last {batch_size:,} docs"
-                )
-                
-                batch_start = time.time()
-        
-        engine.flush()
 
-        # Final update
-        progress_bar.progress(1.0)
-        status_text.text(f"Processed {total_rows:,} / {total_rows:,} records...")
-        
+        for i in range(0, total_rows, chunk_size):
+            batch_start_time = time.time()
+            
+            chunk = df.iloc[i : i + chunk_size]
+            
+            batch_data = [
+                (
+                    int(idx), 
+                    {str(k): str(v) for k, v in row.items() if pd.notna(v)}
+                ) 
+                for idx, row in zip(chunk.index, chunk.to_dict('records'))
+            ]
+            
+            engine.index_batch(batch_data)
+            
+            elapsed_batch = time.time() - batch_start_time
+            current_count = min(i + chunk_size, total_rows)
+            docs_per_sec = len(chunk) / elapsed_batch
+            
+            progress = current_count / total_rows
+            progress_bar.progress(progress)
+            status_text.text(f"Processed {current_count:,} / {total_rows:,} records...")
+            
+            timing_container.metric(
+                "Batch Speed", 
+                f"{docs_per_sec:,.0f} docs/sec",
+                f"{elapsed_batch:.2f}s for last batch"
+            )
+
+        with st.spinner("Finalizing index (LMDB Flush)..."):
+            engine.flush()
+
         build_duration = time.time() - start_time
         overall_rate = total_rows / build_duration
         
@@ -129,7 +136,9 @@ if uploaded_file:
         st.session_state['total_docs'] = total_rows
         
         st.success(f"Successfully indexed {total_rows:,} records in {build_duration:.2f}s!")
-        st.metric("Overall Speed", f"{overall_rate:,.0f} docs/sec")
+        st.metric("Overall Average Speed", f"{overall_rate:,.0f} docs/sec")
+        
+        time.sleep(2)
         st.rerun()
 
 # 3. Multi-Field Search UI
@@ -172,7 +181,7 @@ if submitted:
                 search_log_start = len(log_handler.logs)
                 
                 start_s = time.time()
-                results = st.session_state['engine'].search_complex(active_query, int(top_k))
+                results = st.session_state['engine'].search_complex(active_query, int(top_k), int(blocking_k))
                 search_time_ms = (time.time() - start_s) * 1000
                 
                 # Display timing breakdown

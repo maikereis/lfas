@@ -1,4 +1,5 @@
 use crate::engine;
+use crate::storage::PostingsStorage;
 use crate::timing::Timer;
 use crate::tokenizer::tokenize;
 use crate::{RecordField, StructuredQuery, engine::SearchEngine, storage::LmdbStorage};
@@ -34,6 +35,60 @@ impl PySearchEngine {
         }
     }
 
+    fn map_field(&self, field_name: &str) -> Option<RecordField> {
+        match field_name.to_lowercase().as_str() {
+            "estado" => Some(RecordField::Estado),
+            "municipio" => Some(RecordField::Municipio),
+            "bairro" => Some(RecordField::Bairro),
+            "cep" => Some(RecordField::Cep),
+            "tipo_logradouro" => Some(RecordField::TipoLogradouro),
+            "rua" => Some(RecordField::Rua),
+            "numero" => Some(RecordField::Numero),
+            "complemento" => Some(RecordField::Complemento),
+            "nome" => Some(RecordField::Nome),
+            _ => None,
+        }
+    }
+
+    fn index_batch(&mut self, records: Vec<(usize, HashMap<String, String>)>) {
+        use std::collections::HashMap;
+        
+        // In-memory aggregation: (Field, Term) -> List of DocIds
+        // This drastically reduces trips to the LMDB
+        let mut batch_accumulator: HashMap<(RecordField, String), Vec<usize>> = HashMap::new();
+
+        for (doc_id, record_dict) in records {
+            for (field_name, value) in record_dict {
+                if let Some(field) = self.map_field(&field_name) {
+                    for term in tokenize(&value) {
+                        // Acumula o ID do documento para este termo específico
+                        batch_accumulator
+                            .entry((field, term))
+                            .or_default()
+                            .push(doc_id);
+                    }
+                }
+            }
+            self.inner.metadata.total_docs += 1;
+        }
+
+        // Batch writing to Storage
+        // Now we only perform ONE read and ONE write per single term in the batch
+        for ((field, term), doc_ids) in batch_accumulator {
+            let mut postings = self.inner.index.storage.get(field, &term)
+                .unwrap_or_default()
+                .unwrap_or_else(crate::postings::Postings::new);
+                
+            for id in doc_ids {
+                postings.add_doc(id);
+            }
+            
+            // The LmdbStorage you have already has a WriteBuffer,
+            // so this will be extremely fast.
+            self.inner.index.storage.put(field, term, postings).unwrap();
+        }
+    }
+
     fn index_dict(&mut self, doc_id: usize, record_dict: HashMap<String, String>) {
         if doc_id % 10000 == 0 {
             info!(
@@ -46,18 +101,9 @@ impl PySearchEngine {
         let mut token_count = 0;
 
         for (key, text) in record_dict {
-            let field = match key.to_lowercase().as_str() {
-                "id" => RecordField::Nome,
-                "estado" => RecordField::Estado,
-                "municipio" => RecordField::Municipio,
-                "bairro" => RecordField::Bairro,
-                "cep" => RecordField::Cep,
-                "tipo_logradouro" => RecordField::TipoLogradouro,
-                "rua" => RecordField::Rua,
-                "numero" => RecordField::Numero,
-                "complemento" => RecordField::Complemento,
-                "nome" => RecordField::Nome,
-                _ => continue,
+            let field = match self.map_field(&key) {
+                Some(f) => f,
+                None => continue,
             };
 
             let tokens = tokenize(&text);
@@ -113,6 +159,7 @@ impl PySearchEngine {
         &self,
         query_dict: HashMap<String, String>,
         top_k: usize,
+        blocking_k: usize,
     ) -> Vec<(usize, f32)> {
         info!("[RUST] search_complex called");
         info!("[RUST] Query dict size: {}", query_dict.len());
@@ -129,18 +176,9 @@ impl PySearchEngine {
             }
 
             info!("[RUST] Processing field: {} = '{}'", key, text);
-
-            let field = match key.to_lowercase().as_str() {
-                "estado" => RecordField::Estado,
-                "municipio" => RecordField::Municipio,
-                "bairro" => RecordField::Bairro,
-                "cep" => RecordField::Cep,
-                "tipo_logradouro" => RecordField::TipoLogradouro,
-                "rua" => RecordField::Rua,
-                "numero" => RecordField::Numero,
-                "complemento" => RecordField::Complemento,
-                "nome" => RecordField::Nome,
-                _ => continue,
+            let field = match self.map_field(&key) {
+                Some(f) => f,
+                None => continue,
             };
             query_fields.push((field, text));
         }
@@ -159,9 +197,9 @@ impl PySearchEngine {
         let query = StructuredQuery {
             fields: query_fields,
             top_k,
+            blocking_k,
         };
 
-        let blocking_k = 100_000;
         info!("[RUST] Executing search with blocking_k={}", blocking_k);
 
         let exec_timer = Timer::new("search_complex::execute");

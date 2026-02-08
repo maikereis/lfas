@@ -80,6 +80,7 @@ fn test_structured_address_search() {
     let query_cep = StructuredQuery {
         fields: vec![(RecordField::Cep, "66095-000".to_string())],
         top_k: 5,
+        blocking_k: 10_000,
     };
 
     let results_cep = engine.execute(query_cep, 10);
@@ -98,6 +99,7 @@ fn test_structured_address_search() {
     let query_municipio_only = StructuredQuery {
         fields: vec![(RecordField::Municipio, "Belem".to_string())],
         top_k: 5,
+        blocking_k: 10_000,
     };
 
     let results_municipio_only = engine.execute(query_municipio_only, 10);
@@ -122,6 +124,7 @@ fn test_structured_address_search() {
             (RecordField::Numero, "31".to_string()),
         ],
         top_k: 5,
+        blocking_k: 10_000,
     };
 
     let results_municipio = engine.execute(query_municipio, 10);
@@ -147,6 +150,7 @@ fn test_structured_address_search() {
             (RecordField::Numero, "31".to_string()),
         ],
         top_k: 5,
+        blocking_k: 10_000,
     };
 
     let results_combined = engine.execute(query_combined, 10);

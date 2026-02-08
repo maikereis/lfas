@@ -1,3 +1,5 @@
+use pyo3::pyclass;
+
 pub mod engine;
 pub mod index;
 pub mod metadata;
@@ -12,6 +14,7 @@ pub mod python;
 
 pub type DocId = usize;
 
+#[pyclass]
 #[derive(
     Hash, Eq, PartialEq, Clone, Copy, Ord, PartialOrd, Debug, serde::Serialize, serde::Deserialize,
 )]
@@ -61,6 +64,8 @@ impl Record {
 pub struct StructuredQuery<F> {
     pub fields: Vec<(F, String)>,
     pub top_k: usize,
+    pub blocking_k: usize,
+
 }
 
 #[derive(Debug)]
