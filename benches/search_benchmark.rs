@@ -50,6 +50,7 @@ fn bench_search_scenarios(c: &mut Criterion) {
         let query = StructuredQuery {
             fields: vec![(RecordField::Rua, "unique_path_777".to_string())],
             top_k: 10,
+            blocking_k: 10_000,
         };
         b.iter(|| engine.execute(black_box(query.clone()), 100))
     });
@@ -61,6 +62,7 @@ fn bench_search_scenarios(c: &mut Criterion) {
                 (RecordField::Municipio, "London".to_string()),
             ],
             top_k: 10,
+            blocking_k: 10_000,
         };
         b.iter(|| engine.execute(black_box(query.clone()), 100))
     });

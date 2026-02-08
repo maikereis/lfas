@@ -29,6 +29,7 @@ fn bench_parallel_queries(c: &mut Criterion) {
                         let query = StructuredQuery {
                             fields: vec![(RecordField::Rua, "street".to_string())],
                             top_k: 5,
+                            blocking_k: 10_000,
                         };
                         engine_share.execute(query, 50)
                     }));
