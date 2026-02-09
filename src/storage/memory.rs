@@ -78,4 +78,13 @@ where
         // No-op for in-memory storage
         Ok(())
     }
+
+    // Batch operation (uses default trait implementation which is fine for in-memory)
+    fn get_batch(&self, queries: &[(F, String)]) -> Result<Vec<Option<Postings>>, Self::Error> {
+        let mut results = Vec::with_capacity(queries.len());
+        for (field, term) in queries {
+            results.push(self.data.get(&(*field, term.clone())).cloned());
+        }
+        Ok(results)
+    }
 }

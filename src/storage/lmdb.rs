@@ -1,7 +1,7 @@
 use crate::postings::Postings;
 use super::PostingsStorage;
 use heed::types::{Bytes, Str};
-use heed::{Database, Env, EnvOpenOptions};
+use heed::{Database, Env, EnvOpenOptions, RoTxn};
 use serde::{Serialize, de::DeserializeOwned};
 use std::fs::create_dir_all;
 use std::hash::Hash;
@@ -69,10 +69,10 @@ impl WriteBuffer {
     }
 }
 
-/// High-performance LMDB storage
+/// High-performance LMDB storage with transaction reuse
 pub struct LmdbStorage<F>
 where
-    F: Hash + Eq + Clone + Ord + Serialize + DeserializeOwned,
+    F: Hash + Eq + Clone + Ord + Copy + Serialize + DeserializeOwned,
 {
     env: Env,
     db: Database<Str, Bytes>,
@@ -83,7 +83,7 @@ where
 
 impl<F> LmdbStorage<F>
 where
-    F: Hash + Eq + Clone + Ord + Serialize + DeserializeOwned,
+    F: Hash + Eq + Clone + Ord + Copy + Serialize + DeserializeOwned,
 {
     pub fn flush(&self) -> Result<(), LmdbError> {
         let mut buffer = self.write_buffer.lock().unwrap();
@@ -91,7 +91,6 @@ where
             return Ok(());
         }
 
-        // Sort for optimal LMDB B-tree insertion performance
         buffer.sort();
 
         let mut wtxn = self.env.write_txn().map_err(LmdbError::HeedError)?;
@@ -141,6 +140,32 @@ where
         Ok((field, term.to_string()))
     }
 
+    // Get with existing transaction (for batch operations)
+    fn get_with_txn(&self, txn: &RoTxn, field: F, term: &str) -> Result<Option<Postings>, LmdbError> {
+        let key = Self::encode_key(field, term).map_err(LmdbError::SerializationError)?;
+        
+        match self.db.get(txn, &key).map_err(LmdbError::HeedError)? {
+            Some(bytes) => {
+                let postings: Postings = bincode::deserialize(bytes)
+                    .map_err(LmdbError::SerializationError)?;
+                Ok(Some(postings))
+            }
+            None => Ok(None),
+        }
+    }
+
+    // Batch get operation with single transaction
+    pub fn get_batch(&self, queries: &[(F, String)]) -> Result<Vec<Option<Postings>>, LmdbError> {
+        let rtxn = self.env.read_txn().map_err(LmdbError::HeedError)?;
+        
+        let mut results = Vec::with_capacity(queries.len());
+        for (field, term) in queries {
+            results.push(self.get_with_txn(&rtxn, *field, term)?);
+        }
+        
+        Ok(results)
+    }
+
     pub fn scan<E>(&self, mut callback: impl FnMut(F, &str, &[u8]) -> Result<(), E>) -> Result<(), LmdbError>
     where E: std::fmt::Display 
     {
@@ -156,7 +181,7 @@ where
 
 impl<F> LmdbStorage<F>
 where
-    F: Hash + Eq + Clone + Ord + Serialize + DeserializeOwned + Copy + 'static + std::fmt::Debug,
+    F: Hash + Eq + Clone + Ord + Copy + Serialize + DeserializeOwned + 'static + std::fmt::Debug,
 {
     pub fn open(path: &Path) -> Result<Self, heed::Error> {
         Self::open_with_batch_size(path, BATCH_SIZE)
@@ -181,6 +206,7 @@ where
             EnvOpenOptions::new()
                 .map_size(MAP_SIZE)
                 .max_dbs(NUM_DBS)
+                .max_readers(126)  // Increase max concurrent readers
                 .open(path)?
         };
 
@@ -200,21 +226,14 @@ where
 
 impl<F> PostingsStorage<F> for LmdbStorage<F>
 where
-    F: Hash + Eq + Clone + Ord + Serialize + DeserializeOwned + Copy,
+    F: Hash + Eq + Clone + Ord + Copy + Serialize + DeserializeOwned,
 {
     type Error = LmdbError;
 
     fn get(&self, field: F, term: &str) -> Result<Option<Postings>, Self::Error> {
-        let key = Self::encode_key(field, term).map_err(LmdbError::SerializationError)?;
+        // Create transaction only when needed, drops immediately
         let rtxn = self.env.read_txn().map_err(LmdbError::HeedError)?;
-
-        match self.db.get(&rtxn, &key).map_err(LmdbError::HeedError)? {
-            Some(bytes) => {
-                let postings: Postings = bincode::deserialize(bytes).map_err(LmdbError::SerializationError)?;
-                Ok(Some(postings))
-            }
-            None => Ok(None),
-        }
+        self.get_with_txn(&rtxn, field, term)
     }
 
     fn put(&mut self, field: F, term: String, postings: Postings) -> Result<(), Self::Error> {
@@ -264,12 +283,11 @@ where
 
 impl<F> Drop for LmdbStorage<F>
 where
-    F: Hash + Eq + Clone + Ord + Serialize + DeserializeOwned,
+    F: Hash + Eq + Clone + Ord + Copy + Serialize + DeserializeOwned,
 {
     fn drop(&mut self) {
         let _ = self.flush();
         
-        // Remove from tracking
         if let Ok(path) = self.env.path().canonicalize() {
             let mut envs = OPEN_ENVS.lock().unwrap();
             envs.remove(&path);

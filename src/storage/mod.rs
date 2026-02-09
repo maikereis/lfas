@@ -26,7 +26,6 @@ where
     fn iter(&self) -> Box<dyn Iterator<Item = Result<((F, String), Postings), Self::Error>> + '_>;
 
     /// Zero-copy streaming iteration via callback
-    /// Avoids collecting all results into memory
     fn scan<E>(
         &self,
         callback: impl FnMut(F, &str, &[u8]) -> Result<(), E>,
@@ -37,5 +36,15 @@ where
     /// Flush buffered writes to persistent storage (optional, no-op for in-memory)
     fn flush(&mut self) -> Result<(), Self::Error> {
         Ok(())
+    }
+
+    /// Batch get with single transaction
+    fn get_batch(&self, queries: &[(F, String)]) -> Result<Vec<Option<Postings>>, Self::Error> {
+        // Default: fallback to individual gets (for in-memory storage)
+        let mut results = Vec::with_capacity(queries.len());
+        for (field, term) in queries {
+            results.push(self.get(*field, term)?);
+        }
+        Ok(results)
     }
 }

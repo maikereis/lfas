@@ -26,7 +26,7 @@ where
         self.score_taat_cached(matches, query_tokens, index, metadata)
     }
 
-    /// Score a term-at-a-time
+    /// Score term-at-a-time with BATCH transaction optimization
     fn score_taat_cached<S>(
         &self,
         candidates: RoaringBitmap,
@@ -42,12 +42,31 @@ where
 
         let cache_timer = Timer::new("term-at-a-time::cache_postings");
         
-        // Fetch all postings once and cache in memory
+        // CRITICAL FIX: Use batch operation with single transaction
+        let query_list: Vec<(F, String)> = query_tokens.iter()
+            .map(|(f, t)| (*f, t.clone()))
+            .collect();
+        
         let mut postings_cache: HashMap<(F, String), Postings> = HashMap::new();
         
-        for (field, term) in query_tokens {
-            if let Some(postings) = index.get_postings(*field, term) {
-                postings_cache.insert((*field, term.clone()), postings);
+        // Try batch operation first (works for LMDB)
+        match index.storage.get_batch(&query_list) {
+            Ok(results) => {
+                info!("[SCORER] Using BATCH operation - single transaction for {} terms", query_list.len());
+                for (query, postings_opt) in query_list.iter().zip(results) {
+                    if let Some(postings) = postings_opt {
+                        postings_cache.insert(query.clone(), postings);
+                    }
+                }
+            }
+            Err(_) => {
+                // Fallback for storage types without batch support
+                info!("[SCORER] Batch failed, falling back to individual gets");
+                for (field, term) in query_tokens {
+                    if let Some(postings) = index.get_postings(*field, term) {
+                        postings_cache.insert((*field, term.clone()), postings);
+                    }
+                }
             }
         }
         
