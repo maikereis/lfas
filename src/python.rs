@@ -10,12 +10,12 @@ use pyo3::prelude::*;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
-// Global singleton to avoid multiple openings of the LMDB
+// Use RwLock for concurrent reads (searches)
 static GLOBAL_ENGINE: Lazy<
-    Arc<Mutex<Option<SearchEngine<RecordField, LmdbStorage<RecordField>>>>>,
-> = Lazy::new(|| Arc::new(Mutex::new(None)));
+    Arc<RwLock<Option<SearchEngine<RecordField, LmdbStorage<RecordField>>>>>,
+> = Lazy::new(|| Arc::new(RwLock::new(None)));
 
 #[pyclass]
 pub struct PySearchEngine;
@@ -32,8 +32,8 @@ impl PySearchEngine {
         info!("[RUST] PySearchEngine::new() called");
         let timer = Timer::new("PySearchEngine::new");
 
-        // Initializes the global engine only once.
-        let mut global = GLOBAL_ENGINE.lock().unwrap();
+        // Use write lock only for initialization
+        let mut global = GLOBAL_ENGINE.write().unwrap();
         if global.is_none() {
             info!("[RUST] Creating new LMDB storage (first time)");
             let storage = LmdbStorage::<RecordField>::open(std::path::Path::new("./lmdb_data"))
@@ -42,6 +42,7 @@ impl PySearchEngine {
         } else {
             info!("[RUST] Reusing existing LMDB storage");
         }
+        drop(global); // Release write lock immediately
 
         drop(timer);
         info!("[RUST] PySearchEngine created successfully");
@@ -65,7 +66,7 @@ impl PySearchEngine {
     }
 
     fn index_batch(&mut self, records: Vec<(usize, HashMap<String, String>)>) {
-        let mut global = GLOBAL_ENGINE.lock().unwrap();
+        let mut global = GLOBAL_ENGINE.write().unwrap(); // Write lock for indexing
         let engine = global.as_mut().expect("Engine not initialized");
 
         // In-memory aggregation: (Field, Term) -> List of DocIds
@@ -113,7 +114,7 @@ impl PySearchEngine {
     }
 
     fn index_dict(&mut self, doc_id: usize, record_dict: HashMap<String, String>) {
-        let mut global = GLOBAL_ENGINE.lock().unwrap();
+        let mut global = GLOBAL_ENGINE.write().unwrap(); // Write lock for indexing
         let engine = global.as_mut().expect("Engine not initialized");
 
         if doc_id % 10000 == 0 {
@@ -126,7 +127,7 @@ impl PySearchEngine {
         let mut field_count = 0;
         let mut token_count = 0;
 
-        // Rastrear termos únicos por documento
+        // Track unique terms by document
         let mut doc_terms: HashMap<(RecordField, String), bool> = HashMap::new();
 
         for (key, text) in record_dict {
@@ -178,7 +179,7 @@ impl PySearchEngine {
         info!("[RUST] Flushing buffered writes to disk...");
         let timer = Timer::new("flush");
 
-        let mut global = GLOBAL_ENGINE.lock().unwrap();
+        let mut global = GLOBAL_ENGINE.write().unwrap(); // Write lock for flush
         let engine = global.as_mut().expect("Engine not initialized");
 
         engine.index.storage.flush().map_err(|e| {
@@ -239,7 +240,8 @@ impl PySearchEngine {
 
         let exec_timer = Timer::new("search_complex::execute");
 
-        let global = GLOBAL_ENGINE.lock().unwrap();
+        // Use READ lock for searching (allows concurrent searches)
+        let global = GLOBAL_ENGINE.read().unwrap();
         let engine = global.as_ref().expect("Engine not initialized");
 
         let results: Vec<(usize, f32)> = engine
@@ -268,19 +270,19 @@ impl PySearchEngine {
     }
 
     fn get_total_docs(&self) -> usize {
-        let global = GLOBAL_ENGINE.lock().unwrap();
+        let global = GLOBAL_ENGINE.read().unwrap(); // Read lock
         let engine = global.as_ref().expect("Engine not initialized");
         engine.metadata.total_docs
     }
 
     fn get_stats(&self) -> String {
-        let global = GLOBAL_ENGINE.lock().unwrap();
+        let global = GLOBAL_ENGINE.read().unwrap(); // Read lock
         let engine = global.as_ref().expect("Engine not initialized");
         format!("Total docs indexed: {}", engine.metadata.total_docs)
     }
 
     fn save_metadata(&self, path: &str) -> PyResult<()> {
-        let global = GLOBAL_ENGINE.lock().unwrap();
+        let global = GLOBAL_ENGINE.read().unwrap(); // Read lock
         let engine = global.as_ref().expect("Engine not initialized");
 
         let file = File::create(path)?;
@@ -290,7 +292,7 @@ impl PySearchEngine {
     }
 
     fn load_metadata(&mut self, path: &str) -> PyResult<()> {
-        let mut global = GLOBAL_ENGINE.lock().unwrap();
+        let mut global = GLOBAL_ENGINE.write().unwrap(); // Write lock
         let engine = global.as_mut().expect("Engine not initialized");
 
         let file = File::open(path)?;

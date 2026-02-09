@@ -42,7 +42,7 @@ where
 
         let cache_timer = Timer::new("term-at-a-time::cache_postings");
         
-        // CRITICAL FIX: Use batch operation with single transaction
+        // Use batch operation with single transaction
         let query_list: Vec<(F, String)> = query_tokens.iter()
             .map(|(f, t)| (*f, t.clone()))
             .collect();
