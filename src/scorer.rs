@@ -1,3 +1,4 @@
+use crate::postings::Postings;
 use crate::{DocId, index::InvertedIndex, metadata::FieldMetadata, storage::PostingsStorage};
 use roaring::RoaringBitmap;
 use std::collections::HashMap;
@@ -22,126 +23,123 @@ where
     where
         S: PostingsStorage<F>,
     {
+        self.score_taat_cached(matches, query_tokens, index, metadata)
+    }
+
+    /// Score a term-at-a-time
+    fn score_taat_cached<S>(
+        &self,
+        candidates: RoaringBitmap,
+        query_tokens: &[(F, String)],
+        index: &InvertedIndex<F, S>,
+        metadata: &FieldMetadata<F>,
+    ) -> Vec<(DocId, f32)>
+    where
+        S: PostingsStorage<F>,
+    {
         use crate::timing::Timer;
         use log::{debug, info};
 
-        let _timer = Timer::new("BM25FScorer::score");
-
-        let num_candidates = matches.len();
-        let num_tokens = query_tokens.len();
-
-        info!(
-            "[SCORER] Starting scoring: {} candidates × {} query tokens = {} operations",
-            num_candidates,
-            num_tokens,
-            num_candidates as u64 * num_tokens as u64
-        );
-
-        let avg_timer = Timer::new("calculate_avg_lengths");
-        let avg_lengths = self.calculate_avg_lengths(metadata);
-        drop(avg_timer);
-
-        debug!(
-            "[SCORER] Computed avg lengths for {} fields",
-            avg_lengths.len()
-        );
-
-        let idf_timer = Timer::new("precalculate_idfs");
-        let mut idf_cache = HashMap::new();
+        let cache_timer = Timer::new("term-at-a-time::cache_postings");
+        
+        // Fetch all postings once and cache in memory
+        let mut postings_cache: HashMap<(F, String), Postings> = HashMap::new();
+        
         for (field, term) in query_tokens {
-            let key = (*field, term.as_str());
-            if !idf_cache.contains_key(&key) {
-                let idf = self.calculate_idf(term, *field, metadata);
-                idf_cache.insert(key, idf);
+            if let Some(postings) = index.get_postings(*field, term) {
+                postings_cache.insert((*field, term.clone()), postings);
             }
         }
-        drop(idf_timer);
+        
+        drop(cache_timer);
+        info!("[SCORER] Cached {} postings in memory", postings_cache.len());
 
-        debug!("[SCORER] Pre-calculated {} IDF values", idf_cache.len());
+        let avg_timer = Timer::new("term-at-a-time::precompute");
+        let avg_lengths = self.calculate_avg_lengths(metadata);
+        let mut idf_cache: HashMap<(F, String), f32> = HashMap::new();
+        for (field, term) in query_tokens {
+            let key = (*field, term.clone());
+            let idf = self.calculate_idf(term, *field, metadata);
+            idf_cache.insert(key, idf);
+        }
+        
+        drop(avg_timer);
+        debug!("[SCORER] Precomputed {} IDF values", idf_cache.len());
 
-        let scoring_timer = Timer::new("score_documents");
-        let mut scores = Vec::with_capacity(num_candidates as usize);
+        // Score accumulator - only allocate for candidates
+        let score_timer = Timer::new("term-at-a-time::accumulate_scores");
+        let mut accumulators: HashMap<DocId, f32> = HashMap::new();
+        
+        let mut term_hits = 0u64;
+        let mut term_misses = 0u64;
 
-        let mut postings_hits = 0u64;
-        let mut postings_misses = 0u64;
-        let mut freq_hits = 0u64;
-        let mut freq_misses = 0u64;
-
-        for doc_id_u32 in matches.iter() {
-            let doc_id = doc_id_u32 as usize;
-            let mut doc_score = 0.0;
-
-            for (field, term) in query_tokens {
-                let weight = *self.field_weights.get(field).unwrap_or(&1.0);
-                let b = *self.field_b.get(field).unwrap_or(&0.75);
-
-                let mut weighted_tf = 0.0;
-
-                if let Some(postings) = index.get_postings(*field, term) {
-                    postings_hits += 1;
-
-                    if let Some(&tf) = postings.frequencies.get(&doc_id) {
-                        freq_hits += 1;
-
-                        let dl = *metadata
-                            .lengths
-                            .get(&doc_id)
-                            .and_then(|f| f.get(field))
-                            .unwrap_or(&0) as f32;
-                        let avgdl = *avg_lengths.get(field).unwrap_or(&1.0);
-
-                        weighted_tf = (tf as f32 * weight) / (1.0 + b * (dl / avgdl - 1.0));
-                    } else {
-                        freq_misses += 1;
-                    }
-                } else {
-                    postings_misses += 1;
+        // For each term, update scores of ALL matching candidates at once
+        for (field, term) in query_tokens {
+            let key = (*field, term.clone());
+            
+            let Some(postings) = postings_cache.get(&key) else {
+                term_misses += candidates.len() as u64;
+                continue;
+            };
+            
+            term_hits += 1;
+            
+            // Get precomputed values for this term
+            let idf = idf_cache.get(&key).unwrap_or(&0.0);
+            let weight = *self.field_weights.get(field).unwrap_or(&1.0);
+            let b = *self.field_b.get(field).unwrap_or(&0.75);
+            let avgdl = *avg_lengths.get(field).unwrap_or(&1.0);
+            
+            // Iterate through posting list once, update all matching candidates
+            for doc_id in postings.bitmap.iter() {
+                let doc_id = doc_id as usize;
+                
+                // Skip if not in candidate set
+                if !candidates.contains(doc_id as u32) {
+                    continue;
                 }
-
-                let idf = idf_cache.get(&(*field, term.as_str())).unwrap_or(&0.0);
-                doc_score += idf * (weighted_tf / (self.k1 + weighted_tf));
+                
+                // Get term frequency from cached posting
+                let tf = *postings.frequencies.get(&doc_id).unwrap_or(&0);
+                
+                // Get document length (this is in-memory metadata)
+                let dl = *metadata.lengths
+                    .get(&doc_id)
+                    .and_then(|fields| fields.get(field))
+                    .unwrap_or(&0) as f32;
+                
+                // BM25F calculation
+                let weighted_tf = (tf as f32 * weight) / (1.0 + b * (dl / avgdl - 1.0));
+                let contribution = idf * (weighted_tf / (self.k1 + weighted_tf));
+                
+                // Accumulate score
+                *accumulators.entry(doc_id).or_insert(0.0) += contribution;
             }
-
-            scores.push((doc_id, doc_score));
         }
-        drop(scoring_timer);
-
+        
+        drop(score_timer);
+        
         debug!(
-            "[SCORER] Postings lookup: {} hits, {} misses ({:.1}% hit rate)",
-            postings_hits,
-            postings_misses,
-            if postings_hits + postings_misses > 0 {
-                100.0 * postings_hits as f32 / (postings_hits + postings_misses) as f32
-            } else {
-                0.0
-            }
+            "[SCORER] Stats: {} term hits, {} term misses",
+            term_hits, term_misses
         );
+        
+        info!("[SCORER] Accumulated scores for {} documents", accumulators.len());
 
-        debug!(
-            "[SCORER] Frequency lookup: {} hits, {} misses ({:.1}% hit rate)",
-            freq_hits,
-            freq_misses,
-            if freq_hits + freq_misses > 0 {
-                100.0 * freq_hits as f32 / (freq_hits + freq_misses) as f32
-            } else {
-                0.0
-            }
-        );
-
-        let sort_timer = Timer::new("sort_results");
+        // Sort results
+        let sort_timer = Timer::new("term-at-a-time::sort_results");
+        let mut scores: Vec<_> = accumulators.into_iter().collect();
         scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         drop(sort_timer);
 
         if !scores.is_empty() {
             info!(
-                "[SCORER] Completed: {} documents scored, top score: {:.4}, median: {:.4}, bottom: {:.4}",
+                "[SCORER] Complete: {} documents scored, top: {:.4}, median: {:.4}, bottom: {:.4}",
                 scores.len(),
                 scores.first().map(|(_, s)| *s).unwrap_or(0.0),
                 scores.get(scores.len() / 2).map(|(_, s)| *s).unwrap_or(0.0),
                 scores.last().map(|(_, s)| *s).unwrap_or(0.0)
             );
-        } else {
-            info!("[SCORER] Completed: no documents scored");
         }
 
         scores
