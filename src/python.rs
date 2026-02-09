@@ -5,15 +5,20 @@ use crate::tokenizer::tokenize;
 use crate::{RecordField, StructuredQuery, engine::SearchEngine, storage::LmdbStorage};
 use bincode::{deserialize_from, serialize_into};
 use log::{debug, info};
+use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
+use std::sync::{Arc, Mutex};
+
+// Global singleton to avoid multiple openings of the LMDB
+static GLOBAL_ENGINE: Lazy<
+    Arc<Mutex<Option<SearchEngine<RecordField, LmdbStorage<RecordField>>>>>,
+> = Lazy::new(|| Arc::new(Mutex::new(None)));
 
 #[pyclass]
-pub struct PySearchEngine {
-    inner: SearchEngine<RecordField, LmdbStorage<RecordField>>,
-}
+pub struct PySearchEngine;
 
 #[pymethods]
 impl PySearchEngine {
@@ -27,15 +32,21 @@ impl PySearchEngine {
         info!("[RUST] PySearchEngine::new() called");
         let timer = Timer::new("PySearchEngine::new");
 
-        let storage = LmdbStorage::<RecordField>::open(std::path::Path::new("./lmdb_data"))
-            .expect("Failed to open LMDB storage");
+        // Initializes the global engine only once.
+        let mut global = GLOBAL_ENGINE.lock().unwrap();
+        if global.is_none() {
+            info!("[RUST] Creating new LMDB storage (first time)");
+            let storage = LmdbStorage::<RecordField>::open(std::path::Path::new("./lmdb_data"))
+                .expect("Failed to open LMDB storage");
+            *global = Some(engine::SearchEngine::with_storage(storage));
+        } else {
+            info!("[RUST] Reusing existing LMDB storage");
+        }
 
         drop(timer);
         info!("[RUST] PySearchEngine created successfully");
 
-        PySearchEngine {
-            inner: engine::SearchEngine::with_storage(storage),
-        }
+        PySearchEngine
     }
 
     fn map_field(&self, field_name: &str) -> Option<RecordField> {
@@ -54,8 +65,9 @@ impl PySearchEngine {
     }
 
     fn index_batch(&mut self, records: Vec<(usize, HashMap<String, String>)>) {
-        use std::collections::HashMap;
-        
+        let mut global = GLOBAL_ENGINE.lock().unwrap();
+        let engine = global.as_mut().expect("Engine not initialized");
+
         // In-memory aggregation: (Field, Term) -> List of DocIds
         // This drastically reduces trips to the LMDB
         let mut batch_accumulator: HashMap<(RecordField, String), Vec<usize>> = HashMap::new();
@@ -64,7 +76,6 @@ impl PySearchEngine {
             for (field_name, value) in record_dict {
                 if let Some(field) = self.map_field(&field_name) {
                     for term in tokenize(&value) {
-                        // Acumula o ID do documento para este termo específico
                         batch_accumulator
                             .entry((field, term))
                             .or_default()
@@ -72,7 +83,7 @@ impl PySearchEngine {
                     }
                 }
             }
-            self.inner.metadata.total_docs += 1;
+            engine.metadata.total_docs += 1;
         }
 
         // Batch writing to Storage
@@ -80,35 +91,43 @@ impl PySearchEngine {
         for ((field, term), mut doc_ids) in batch_accumulator {
             doc_ids.sort_unstable();
             doc_ids.dedup();
-            
-            let mut postings = self.inner.index.storage.get(field, &term)
+
+            let mut postings = engine
+                .index
+                .storage
+                .get(field, &term)
                 .unwrap_or_default()
                 .unwrap_or_else(crate::postings::Postings::new);
-                
+
             for id in doc_ids {
                 postings.add_doc(id);
             }
-            
-            
+
             let key = (field, term.clone());
-            self.inner.metadata.term_df.insert(key, postings.len());
-            
+            engine.metadata.term_df.insert(key, postings.len());
+
             // The LmdbStorage we have already has a WriteBuffer,
             // so this will be extremely fast.
-            self.inner.index.storage.put(field, term, postings).unwrap();
+            engine.index.storage.put(field, term, postings).unwrap();
         }
     }
 
     fn index_dict(&mut self, doc_id: usize, record_dict: HashMap<String, String>) {
+        let mut global = GLOBAL_ENGINE.lock().unwrap();
+        let engine = global.as_mut().expect("Engine not initialized");
+
         if doc_id % 10000 == 0 {
             info!(
                 "[RUST] Indexing doc_id: {} (Total docs: {})",
-                doc_id, self.inner.metadata.total_docs
+                doc_id, engine.metadata.total_docs
             );
         }
 
         let mut field_count = 0;
         let mut token_count = 0;
+
+        // Rastrear termos únicos por documento
+        let mut doc_terms: HashMap<(RecordField, String), bool> = HashMap::new();
 
         for (key, text) in record_dict {
             let field = match self.map_field(&key) {
@@ -122,28 +141,29 @@ impl PySearchEngine {
             field_count += 1;
 
             for token in tokens {
-                self.inner.index.add_term(doc_id, field, token.clone());
-
-                let key = (field, token);
-                *self.inner.metadata.term_df.entry(key).or_insert(0) += 1;
+                engine.index.add_term(doc_id, field, token.clone());
+                doc_terms.insert((field, token), true);
             }
 
-            self.inner
+            engine
                 .metadata
                 .lengths
                 .entry(doc_id)
                 .or_default()
                 .insert(field, this_field_tokens);
-            *self
-                .inner
+            *engine
                 .metadata
                 .total_field_lengths
                 .entry(field)
                 .or_insert(0) += this_field_tokens;
         }
 
-        if doc_id >= self.inner.metadata.total_docs {
-            self.inner.metadata.total_docs = doc_id + 1;
+        for (key, _) in doc_terms {
+            *engine.metadata.term_df.entry(key).or_insert(0) += 1;
+        }
+
+        if doc_id >= engine.metadata.total_docs {
+            engine.metadata.total_docs = doc_id + 1;
         }
 
         if doc_id == 0 {
@@ -157,9 +177,14 @@ impl PySearchEngine {
     fn flush(&mut self) -> PyResult<()> {
         info!("[RUST] Flushing buffered writes to disk...");
         let timer = Timer::new("flush");
-        self.inner.index.storage.flush().map_err(|e| {
+
+        let mut global = GLOBAL_ENGINE.lock().unwrap();
+        let engine = global.as_mut().expect("Engine not initialized");
+
+        engine.index.storage.flush().map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Flush failed: {}", e))
         })?;
+
         drop(timer);
         info!("[RUST] Flush complete");
         Ok(())
@@ -213,12 +238,16 @@ impl PySearchEngine {
         info!("[RUST] Executing search with blocking_k={}", blocking_k);
 
         let exec_timer = Timer::new("search_complex::execute");
-        let results: Vec<(usize, f32)> = self
-            .inner
+
+        let global = GLOBAL_ENGINE.lock().unwrap();
+        let engine = global.as_ref().expect("Engine not initialized");
+
+        let results: Vec<(usize, f32)> = engine
             .execute(query, blocking_k)
             .into_iter()
             .map(|hit| (hit.doc_id, hit.score))
             .collect();
+
         drop(exec_timer);
 
         info!("[RUST] Search returned {} results", results.len());
@@ -239,24 +268,34 @@ impl PySearchEngine {
     }
 
     fn get_total_docs(&self) -> usize {
-        self.inner.metadata.total_docs
+        let global = GLOBAL_ENGINE.lock().unwrap();
+        let engine = global.as_ref().expect("Engine not initialized");
+        engine.metadata.total_docs
     }
 
     fn get_stats(&self) -> String {
-        format!("Total docs indexed: {}", self.inner.metadata.total_docs)
+        let global = GLOBAL_ENGINE.lock().unwrap();
+        let engine = global.as_ref().expect("Engine not initialized");
+        format!("Total docs indexed: {}", engine.metadata.total_docs)
     }
 
     fn save_metadata(&self, path: &str) -> PyResult<()> {
+        let global = GLOBAL_ENGINE.lock().unwrap();
+        let engine = global.as_ref().expect("Engine not initialized");
+
         let file = File::create(path)?;
         let writer = BufWriter::new(file);
-        serialize_into(writer, &self.inner.metadata)
+        serialize_into(writer, &engine.metadata)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))
     }
-    
+
     fn load_metadata(&mut self, path: &str) -> PyResult<()> {
+        let mut global = GLOBAL_ENGINE.lock().unwrap();
+        let engine = global.as_mut().expect("Engine not initialized");
+
         let file = File::open(path)?;
         let reader = BufReader::new(file);
-        self.inner.metadata = deserialize_from(reader)
+        engine.metadata = deserialize_from(reader)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
         Ok(())
     }
