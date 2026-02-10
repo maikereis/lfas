@@ -13,6 +13,10 @@ LFAS implements a two-stage retrieval architecture inspired by the approach desc
 
 For a detailed explanation of the implementation and design decisions (in Portuguese), see the blog post: ["Como tornar buscas de endereços rápidas e precisas"](https://maikerar.substack.com/p/como-tornar-buscas-de-enderecos-rapidas).
 
+## Preview
+
+<img src="img/preview.png" alt="" width="900" height="1000">
+
 ## Features
 
 - **Fuzzy Search**: Handles typos and partial address descriptions
@@ -64,7 +68,16 @@ cd lfas
 make develop
 
 # Install Python dependencies
-pip install -r requirements.txt
+uv sync
+```
+
+### Building 
+
+```bash
+# Activate env
+source .venv/bin/activate
+
+make develop
 ```
 
 ### Running the Application

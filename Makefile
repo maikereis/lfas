@@ -13,7 +13,7 @@ all: build
 build:
 	$(CARGO) build
 
-develop:
+develop: build
 	maturin develop
 
 release:
