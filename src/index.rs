@@ -34,7 +34,7 @@ where
             .unwrap_or_default()
             .unwrap_or_else(Postings::new);
 
-        postings.add_doc(id);
+        postings.add_occurrence(id);
 
         self.storage.put(field, term, postings).unwrap();
     }
@@ -42,25 +42,25 @@ where
     pub fn add_batch(&mut self, batch: Vec<(DocId, Vec<(F, String)>)>) {
         // We aggregate all the terms of the batch into memory first.
         // This avoids the constant Get-Modify-Put in LMDB.
-        let mut temp_map: HashMap<(F, String), RoaringBitmap> = HashMap::new();
+        let mut temp_map: HashMap<(F, String), Postings> = HashMap::new();
 
         for (id, fields) in batch {
             for (field, term) in fields {
                 temp_map.entry((field, term))
-                    .or_default()
-                    .insert(id as u32);
+                    .or_insert_with(Postings::new)
+                    .add_occurrence(id);
             }
         }
 
-        // Now we merge with storage only once per single term.
-        for ((field, term), new_bitmap) in temp_map {
-            let mut postings = self.storage
+        for ((field, term), batch_postings) in temp_map {
+            let mut existing_postings = self.storage
                 .get(field, &term)
                 .unwrap_or_default()
                 .unwrap_or_else(Postings::new);
                 
-            postings.bitmap |= new_bitmap; // Operação de união de bitmaps (veloz)
-            self.storage.put(field, term, postings).unwrap();
+            existing_postings.merge(batch_postings);
+            
+            self.storage.put(field, term, existing_postings).unwrap();
         }
     }
 
@@ -75,7 +75,7 @@ where
 
     pub fn term_bitmap(&self, field: F, term: &str) -> RoaringBitmap {
         self.get_postings(field, term)
-            .map(|p| p.bitmap)
+            .map(|p| p.bitmap().clone())
             .unwrap_or_else(RoaringBitmap::new)
     }
 

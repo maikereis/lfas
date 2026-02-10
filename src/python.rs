@@ -101,7 +101,7 @@ impl PySearchEngine {
                 .unwrap_or_else(crate::postings::Postings::new);
 
             for id in doc_ids {
-                postings.add_doc(id);
+                postings.add_occurrence(id);
             }
 
             let key = (field, term.clone());

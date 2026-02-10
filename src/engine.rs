@@ -65,7 +65,7 @@ where
             for token in &token_set.distinctive {
                 if let Some(postings) = self.index.get_postings(*field, token) {
                     let before = candidates.len();
-                    candidates |= &postings.bitmap;
+                    candidates |= postings.bitmap();
                     let after = candidates.len();
                     debug!(
                         "[SEARCH]     Token '{}' added {} candidates (total: {} -> {})",
@@ -106,7 +106,7 @@ where
             for (field, token, df) in token_rareness.iter().take(k_rarest) {
                 if let Some(postings) = self.index.get_postings(**field, token) {
                     let before = candidates.len();
-                    candidates |= &postings.bitmap;
+                    candidates |= postings.bitmap();
                     let after = candidates.len();
                     info!(
                         "[SEARCH]   Fallback token '{}' (df={}) added {} candidates (total: {})",

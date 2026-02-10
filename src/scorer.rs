@@ -110,7 +110,7 @@ where
             let avgdl = *avg_lengths.get(field).unwrap_or(&1.0);
             
             // Iterate through posting list once, update all matching candidates
-            for doc_id in postings.bitmap.iter() {
+            for doc_id in postings.bitmap().iter() {
                 let doc_id = doc_id as usize;
                 
                 // Skip if not in candidate set
@@ -119,7 +119,7 @@ where
                 }
                 
                 // Get term frequency from cached posting
-                let tf = *postings.frequencies.get(&doc_id).unwrap_or(&0);
+                let tf = *postings.frequencies().get(&doc_id).unwrap_or(&0);
                 
                 // Get document length (this is in-memory metadata)
                 let dl = *metadata.lengths
