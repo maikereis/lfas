@@ -22,6 +22,32 @@ from lfas import PySearchEngine
 PySearchEngine.init_logging()
 
 
+# Default weights configuration
+DEFAULT_WEIGHTS = {
+    "numero": 10.0,
+    "cep": 8.0,
+    "rua": 5.0,
+    "municipio": 3.0,
+    "bairro": 2.0,
+    "complemento": 1.5,
+    "estado": 1.0,
+    "tipo_logradouro": 0.5,
+    "nome": 1.0,
+}
+
+DEFAULT_B_VALUES = {
+    "numero": 0.0,
+    "cep": 0.0,
+    "estado": 0.0,
+    "rua": 0.75,
+    "municipio": 0.5,
+    "bairro": 0.75,
+    "complemento": 0.5,
+    "tipo_logradouro": 0.0,
+    "nome": 0.75,
+}
+
+
 def index_exists():
     """Check if both LMDB data and metadata exist"""
     lmdb_path = Path("./lmdb_data")
@@ -115,6 +141,12 @@ if 'index_loaded' not in st.session_state:
     st.session_state['index_loaded'] = index_exists()
 if 'documents_loaded' not in st.session_state:
     st.session_state['documents_loaded'] = False
+if 'custom_weights' not in st.session_state:
+    st.session_state['custom_weights'] = DEFAULT_WEIGHTS.copy()
+if 'custom_b_values' not in st.session_state:
+    st.session_state['custom_b_values'] = DEFAULT_B_VALUES.copy()
+if 'use_custom_weights' not in st.session_state:
+    st.session_state['use_custom_weights'] = False
 
 
 # Load engine only if index exists
@@ -181,7 +213,7 @@ with st.sidebar:
 
 
 # 2. Main Content Area - Tabs for different operations
-tab1, tab2, tab3 = st.tabs(["🔍 Search", "📥 Index Documents", "📂 Load Documents"])
+tab1, tab2, tab3, tab4 = st.tabs(["🔍 Search", "⚙️ Weights Config", "📥 Index Documents", "📂 Load Documents"])
 
 # TAB 1: Search (only shown when index is loaded)
 with tab1:
@@ -189,6 +221,12 @@ with tab1:
         st.warning("⚠️ No index available. Please create an index first in the 'Index Documents' tab.")
     else:
         st.subheader("🔍 Field-Aware Query")
+        
+        # Show current weights status
+        if st.session_state['use_custom_weights']:
+            st.info("🎯 Using custom weights - Configure in 'Weights Config' tab")
+        else:
+            st.info("📋 Using default weights - Configure in 'Weights Config' tab")
         
         with st.form("search_form"):
             r1c1, r1c2, r1c3 = st.columns(3)
@@ -220,6 +258,13 @@ with tab1:
                 try:
                     # Get engine
                     engine = get_engine()
+                    
+                    # Apply custom weights if enabled
+                    if st.session_state['use_custom_weights']:
+                        engine.set_field_weights(st.session_state['custom_weights'])
+                        engine.set_field_b_values(st.session_state['custom_b_values'])
+                    else:
+                        engine.reset_weights()
                     
                     # Clear search-related logs before search
                     log_handler = st.session_state['log_handler']
@@ -282,8 +327,97 @@ with tab1:
                     st.error(f"Error during search: {str(e)}")
                     st.exception(e)
 
-# TAB 2: Index Documents
+# TAB 2: Weights Configuration
 with tab2:
+    st.subheader("⚙️ BM25F Scoring Configuration")
+    
+    st.markdown("""
+    ### Field Weights
+    Control the importance of each field in scoring. Higher values mean the field is more important.
+    
+    ### Length Normalization (b values)
+    - **0.0**: No normalization (exact matches preferred, field length ignored)
+    - **0.75**: Moderate normalization (balanced)
+    - **1.0**: Full normalization (penalize long fields heavily)
+    
+    Fields like CEP and Número typically use **b=0.0** because they're fixed-length identifiers.
+    """)
+    
+    # Toggle custom weights
+    use_custom = st.checkbox(
+        "Use Custom Weights", 
+        value=st.session_state['use_custom_weights'],
+        help="Enable to customize field weights and normalization parameters"
+    )
+    st.session_state['use_custom_weights'] = use_custom
+    
+    if use_custom:
+        st.divider()
+        
+        # Create two columns for weights
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("#### Field Weights")
+            
+            for field in sorted(DEFAULT_WEIGHTS.keys()):
+                current_value = st.session_state['custom_weights'].get(field, DEFAULT_WEIGHTS[field])
+                new_value = st.slider(
+                    field.replace('_', ' ').title(),
+                    min_value=0.0,
+                    max_value=20.0,
+                    value=current_value,
+                    step=0.5,
+                    key=f"weight_{field}",
+                    help=f"Default: {DEFAULT_WEIGHTS[field]}"
+                )
+                st.session_state['custom_weights'][field] = new_value
+        
+        with col2:
+            st.markdown("#### Length Normalization (b)")
+            
+            for field in sorted(DEFAULT_B_VALUES.keys()):
+                current_value = st.session_state['custom_b_values'].get(field, DEFAULT_B_VALUES[field])
+                new_value = st.slider(
+                    field.replace('_', ' ').title(),
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=current_value,
+                    step=0.05,
+                    key=f"b_{field}",
+                    help=f"Default: {DEFAULT_B_VALUES[field]}"
+                )
+                st.session_state['custom_b_values'][field] = new_value
+        
+        st.divider()
+        
+        # Reset button
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            if st.button("🔄 Reset to Defaults", use_container_width=True):
+                st.session_state['custom_weights'] = DEFAULT_WEIGHTS.copy()
+                st.session_state['custom_b_values'] = DEFAULT_B_VALUES.copy()
+                st.success("Reset to default values!")
+                time.sleep(1)
+                st.rerun()
+        
+        # Show current configuration
+        with st.expander("📋 Current Configuration", expanded=False):
+            st.markdown("**Weights:**")
+            st.json(st.session_state['custom_weights'])
+            st.markdown("**B-Values:**")
+            st.json(st.session_state['custom_b_values'])
+    
+    else:
+        st.info("Custom weights are disabled. The search will use default BM25F parameters.")
+        with st.expander("📋 Default Configuration"):
+            st.markdown("**Default Weights:**")
+            st.json(DEFAULT_WEIGHTS)
+            st.markdown("**Default B-Values:**")
+            st.json(DEFAULT_B_VALUES)
+
+# TAB 3: Index Documents
+with tab3:
     st.subheader("📥 Create Search Index")
     
     if st.session_state['index_loaded']:
@@ -305,7 +439,7 @@ with tab2:
                 st.dataframe(df.head(10))
             
             if st.button("🔥 Build Index", type="primary", use_container_width=True):
-                # CRITICAL: Clear cache and force garbage collection BEFORE creating new engine
+                # Clear cache and force garbage collection BEFORE creating new engine
                 st.cache_resource.clear()
                 import gc
                 gc.collect()
@@ -370,8 +504,8 @@ with tab2:
                 time.sleep(2)
                 st.rerun()
 
-# TAB 3: Load Documents
-with tab3:
+# TAB 4: Load Documents
+with tab4:
     st.subheader("📂 Load Documents for Display")
     
     if st.session_state['documents_loaded']:

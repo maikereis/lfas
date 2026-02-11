@@ -18,7 +18,10 @@ static GLOBAL_ENGINE: Lazy<
 > = Lazy::new(|| Arc::new(RwLock::new(None)));
 
 #[pyclass]
-pub struct PySearchEngine;
+pub struct PySearchEngine {
+    custom_weights: Option<HashMap<RecordField, f32>>,
+    custom_b_values: Option<HashMap<RecordField, f32>>,
+}
 
 #[pymethods]
 impl PySearchEngine {
@@ -47,7 +50,72 @@ impl PySearchEngine {
         drop(timer);
         info!("[RUST] PySearchEngine created successfully");
 
-        PySearchEngine
+        PySearchEngine {
+            custom_weights: None,
+            custom_b_values: None,
+        }
+    }
+
+    fn set_field_weights(&mut self, weights: HashMap<String, f32>) {
+        let mut field_weights = HashMap::new();
+
+        for (field_name, weight) in weights {
+            if let Some(field) = self.map_field(&field_name) {
+                field_weights.insert(field, weight);
+                info!("[RUST] Set weight for {:?}: {}", field, weight);
+            } else {
+                info!("[RUST] Warning: Unknown field '{}'", field_name);
+            }
+        }
+
+        self.custom_weights = Some(field_weights);
+        info!(
+            "[RUST] Custom weights configured for {} fields",
+            self.custom_weights.as_ref().unwrap().len()
+        );
+    }
+
+    fn set_field_b_values(&mut self, b_values: HashMap<String, f32>) {
+        let mut field_b = HashMap::new();
+
+        for (field_name, b_value) in b_values {
+            if let Some(field) = self.map_field(&field_name) {
+                field_b.insert(field, b_value);
+                info!("[RUST] Set b-value for {:?}: {}", field, b_value);
+            } else {
+                info!("[RUST] Warning: Unknown field '{}'", field_name);
+            }
+        }
+
+        self.custom_b_values = Some(field_b);
+        info!(
+            "[RUST] Custom b-values configured for {} fields",
+            self.custom_b_values.as_ref().unwrap().len()
+        );
+    }
+
+    /// Reset to default weights
+    fn reset_weights(&mut self) {
+        self.custom_weights = None;
+        self.custom_b_values = None;
+        info!("[RUST] Reset to default weights");
+    }
+
+    /// Get current weights configuration
+    fn get_weights(&self) -> HashMap<String, f32> {
+        let global = GLOBAL_ENGINE.read().unwrap();
+        let engine = global.as_ref().expect("Engine not initialized");
+
+        let weights = if let Some(ref custom) = self.custom_weights {
+            custom.clone()
+        } else {
+            engine.scorer.field_weights.clone()
+        };
+
+        weights
+            .into_iter()
+            .map(|(field, weight)| (format!("{:?}", field).to_lowercase(), weight))
+            .collect()
     }
 
     fn map_field(&self, field_name: &str) -> Option<RecordField> {
@@ -241,8 +309,19 @@ impl PySearchEngine {
         let exec_timer = Timer::new("search_complex::execute");
 
         // Use READ lock for searching (allows concurrent searches)
-        let global = GLOBAL_ENGINE.read().unwrap();
-        let engine = global.as_ref().expect("Engine not initialized");
+        let mut global = GLOBAL_ENGINE.write().unwrap();
+        let engine = global.as_mut().expect("Engine not initialized");
+
+        // Apply custom weights if configured
+        if let Some(ref weights) = self.custom_weights {
+            info!("[RUST] Applying custom weights for search");
+            engine.scorer.field_weights = weights.clone();
+        }
+
+        if let Some(ref b_values) = self.custom_b_values {
+            info!("[RUST] Applying custom b-values for search");
+            engine.scorer.field_b = b_values.clone();
+        }
 
         let results: Vec<(usize, f32)> = engine
             .execute(query, blocking_k)
