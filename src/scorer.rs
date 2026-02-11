@@ -5,8 +5,8 @@ use std::collections::HashMap;
 
 pub struct BM25FScorer<F> {
     pub k1: f32,
-    pub field_weights: std::collections::HashMap<F, f32>,
-    pub field_b: std::collections::HashMap<F, f32>,
+    pub field_weights: HashMap<F, f32>,
+    pub field_b: HashMap<F, f32>,
 }
 
 impl<F> BM25FScorer<F>
