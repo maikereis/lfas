@@ -272,7 +272,7 @@ with tab1:
                                         estado = record.get('estado', '')
                                         cep = record.get('cep', '')
                                         
-                                        info.write(f"**{tipo} {rua}, {numero}**")
+                                        info.write(f"**{tipo}, {rua}, {numero}**")
                                         info.write(f"{bairro} — {municipio}, {estado}")
                                         info.caption(f"CEP: {cep} | ID: {doc_id}")
                                     else:
@@ -320,7 +320,7 @@ with tab2:
                 
                 # Performance metrics
                 start_time = time.time()
-                chunk_size = 100_000
+                chunk_size = 500_000
                 
                 # Clear previous logs
                 log_handler = st.session_state['log_handler']
@@ -332,11 +332,8 @@ with tab2:
                     chunk = df.iloc[i : i + chunk_size]
                     
                     batch_data = [
-                        (
-                            int(idx), 
-                            {str(k): str(v) for k, v in row.items() if pd.notna(v)}
-                        ) 
-                        for idx, row in zip(chunk.index, chunk.to_dict('records'))
+                        (int(idx), {k: str(v) for k, v in zip(chunk.columns, row) if pd.notna(v)})
+                        for idx, row in zip(chunk.index, chunk.values)
                     ]
                     
                     engine.index_batch(batch_data)
