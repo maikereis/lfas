@@ -4,7 +4,7 @@ use crate::scorer::BM25FScorer;
 use crate::storage::PostingsStorage;
 use crate::timing::Timer;
 use crate::tokenizer::tokenize_structured;
-use crate::{SearchHit, StructuredQuery};
+use crate::{RecordField, SearchHit, StructuredQuery};
 use log::{debug, info};
 use roaring::RoaringBitmap;
 use std::collections::HashMap;
@@ -20,25 +20,53 @@ where
     pub scorer: BM25FScorer<F>,
 }
 
-impl<F, S> SearchEngine<F, S>
+impl<S> SearchEngine<RecordField, S>
 where
-    F: Hash + Eq + Clone + Ord + Copy + std::fmt::Debug,
-    S: PostingsStorage<F>,
+    S: PostingsStorage<RecordField>,
 {
     pub fn with_storage(storage: S) -> Self {
-        let field_weights = HashMap::new();
+        let mut field_weights = HashMap::new();
+
+        // Use _f32 suffix to ensure types match the f32 in BM25FScorer
+        field_weights.insert(RecordField::Numero, 10.0_f32);
+        field_weights.insert(RecordField::Cep, 8.0_f32);
+        field_weights.insert(RecordField::Rua, 5.0_f32);
+        field_weights.insert(RecordField::Municipio, 3.0_f32);
+        field_weights.insert(RecordField::Bairro, 2.0_f32);
+        field_weights.insert(RecordField::Complemento, 1.5_f32);
+        field_weights.insert(RecordField::Estado, 1.0_f32);
+        field_weights.insert(RecordField::TipoLogradouro, 0.5_f32);
+        field_weights.insert(RecordField::Nome, 1.0_f32);
+
+        let mut field_b = HashMap::new();
+
+        field_b.insert(RecordField::Numero, 0.0_f32);
+        field_b.insert(RecordField::Cep, 0.0_f32);
+        field_b.insert(RecordField::Estado, 0.0_f32);
+        field_b.insert(RecordField::Rua, 0.75_f32);
+        field_b.insert(RecordField::Municipio, 0.5_f32);
+        field_b.insert(RecordField::Bairro, 0.75_f32);
+        field_b.insert(RecordField::Complemento, 0.5_f32);
+        field_b.insert(RecordField::TipoLogradouro, 0.0_f32);
+        field_b.insert(RecordField::Nome, 0.75_f32);
 
         Self {
             index: InvertedIndex::new(storage),
             metadata: FieldMetadata::new(),
             scorer: BM25FScorer {
-                k1: 1.2,
+                k1: 1.2_f32,
                 field_weights,
-                field_b: HashMap::new(),
+                field_b,
             },
         }
     }
+}
 
+impl<F, S> SearchEngine<F, S>
+where
+    F: Hash + Eq + Clone + Ord + Copy + std::fmt::Debug,
+    S: PostingsStorage<F>,
+{
     pub fn execute(&self, query: StructuredQuery<F>, _blocking_k: usize) -> Vec<SearchHit> {
         info!("[SEARCH] Starting search execution");
         let search_timer = Timer::new("SearchEngine::execute");
