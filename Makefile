@@ -17,7 +17,7 @@ develop: build
 	maturin develop
 
 release:
-	maturin delevop --release
+	maturin develop --release
 
 ## Test: Run all unit and integration tests
 test:
