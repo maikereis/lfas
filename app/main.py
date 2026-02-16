@@ -105,6 +105,8 @@ def get_engine():
         except Exception as e:
             logging.error(f"Failed to load metadata: {e}")
             st.error(f"Failed to load existing index: {e}")
+    else:
+        metadata_path.parent.mkdir(exist_ok=True)
     
     return engine
 
@@ -308,8 +310,15 @@ with tab1:
                                     sc, info = st.columns([1, 4])
                                     sc.metric("Score", f"{score:.2f}", f"Rank #{rank}")
                                     
-                                    if doc_id < len(df):
-                                        record = df.iloc[doc_id]
+                                    try:
+                                        # Use query to find the row with matching id
+                                        matching_rows = df.query(f"id == {doc_id}")
+                                        
+                                        if len(matching_rows) == 0:
+                                            info.error(f"Doc ID {doc_id} not found in loaded documents")
+                                            continue
+                                        
+                                        record = matching_rows.iloc[0]
                                         
                                         tipo = record.get('tipo_logradouro', '')
                                         rua = record.get('rua', '')
@@ -322,8 +331,8 @@ with tab1:
                                         info.write(f"**{tipo}, {rua}, {numero}**")
                                         info.write(f"{bairro} — {municipio}, {estado}")
                                         info.caption(f"CEP: {cep} | ID: {doc_id}")
-                                    else:
-                                        info.error(f"Doc ID {doc_id} out of range")
+                                    except Exception as e:
+                                        info.error(f"Error displaying doc {doc_id}: {str(e)}")
                 
                 except Exception as e:
                     st.error(f"Error during search: {str(e)}")
@@ -467,10 +476,12 @@ with tab3:
                     
                     chunk = df.iloc[i : i + chunk_size]
                     
-                    batch_data = [
-                        (int(idx), {k: str(v) for k, v in zip(chunk.columns, row) if pd.notna(v)})
-                        for idx, row in zip(chunk.index, chunk.values)
-                    ]
+                    batch_data = []
+                    for _, row in chunk.iterrows():
+                        doc_id = int(row['id'])
+                        # Exclude 'id' from indexed fields
+                        doc_dict = {k: str(v) for k, v in row.items() if pd.notna(v) and k != 'id'}
+                        batch_data.append((doc_id, doc_dict))
                     
                     engine.index_batch(batch_data)
                     
