@@ -4,7 +4,7 @@ BINARY_NAME = lfas
 TEST_FLAGS = --all-features
 BENCH_NAME ?= index_benchmark
 
-.PHONY: all build run test bench check clean doc help
+.PHONY: all build run test benches check clean doc help
 
 # Default action: compile the project
 all: build
@@ -18,10 +18,6 @@ develop: build
 
 release:
 	maturin delevop --release
-
-## Run: Run the main application (expects CSV data via stdin as per your main.rs)
-run:
-	$(CARGO) run
 
 ## Test: Run all unit and integration tests
 test:
@@ -50,6 +46,9 @@ bench-concurrency:
 bench-tokenizer:
 	$(CARGO) bench --bench tokenizer_benchmark
 
+# Shortcut for running all benchmarks
+benches:
+	$(CARGO) bench
 
 ## Check: Run clippy for linting and static analysis (Essential for Rust learners!)
 check:
