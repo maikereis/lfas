@@ -78,8 +78,13 @@ Access the web interface at `http://localhost:8501`.
 
 Upload a CSV file with address data. Required columns:
 
+---
+
+> You can obtain address data from the [National Address Registry for Statistical Purposes](https://github.com/maikereis/CNEFE-data), a comprehensive database of georeferenced residential addresses across Brazil.
+
 | Column            | Description        |
 |-------------------|--------------------|
+| `id`              | Address Id         |
 | `rua`             | Street name        |
 | `municipio`       | City               |
 | `estado`          | State              |
@@ -90,12 +95,47 @@ Upload a CSV file with address data. Required columns:
 | `complemento`     | Address complement |
 | `nome`            | Name / identifier  |
 
-### Searching Addresses
+### Creating the index
 ```python
+import time
+import pandas as pd
+from pathlib import Path
 from lfas import SearchEngine
 
 engine = SearchEngine()
-engine.load_metadata("./lmdb_data/metadata.bin")
+
+df = pd.read_csv("addresses.csv")
+chunk_size = 100_000
+total_rows = len(df)
+
+metadata_file = "./lmdb_data/metadata.bin"
+Path(metadata_file).parent.mkdir(exist_ok=True)
+
+for i in range(0, total_rows, chunk_size):
+    batch_start_time = time.time()
+
+    chunk = df.iloc[i : i + chunk_size]
+
+    batch_data = [
+        (int(idx), {k: str(v) for k, v in zip(chunk.columns, row) if pd.notna(v)})
+        for idx, row in zip(chunk.index, chunk.values)
+    ]
+
+    engine.index_batch(batch_data)
+
+engine.flush()
+engine.save_metadata(metadata_file)
+```
+
+### Searching Addresses
+```python
+from pathlib import Path
+from lfas import SearchEngine
+
+metadata_file = "./lmdb_data/metadata.bin"
+
+engine = SearchEngine()
+engine.load_metadata(metadata_file)
 
 results = engine.search(
     query={"rua": "Mauriti", "municipio": "Belem", "numero": "31"},
