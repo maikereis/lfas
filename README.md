@@ -108,8 +108,10 @@ df = pd.read_csv("addresses.csv")
 chunk_size = 100_000
 total_rows = len(df)
 
-metadata_file = "./lmdb_data/metadata.bin"
-Path(metadata_file).parent.mkdir(exist_ok=True)
+index_folder = Path("./lmdb_data")
+index_folder.mkdir(exist_ok=True)
+
+metadata_file = index_folder / "metadata.bin"
 
 for i in range(0, total_rows, chunk_size):
     batch_start_time = time.time()
@@ -132,7 +134,8 @@ engine.save_metadata(metadata_file)
 from pathlib import Path
 from lfas import SearchEngine
 
-metadata_file = "./lmdb_data/metadata.bin"
+index_folder = Path("./lmdb_data")
+metadata_file = index_folder / "metadata.bin"
 
 engine = SearchEngine()
 engine.load_metadata(metadata_file)
