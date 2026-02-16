@@ -6,7 +6,8 @@ High-performance BM25F search engine for Brazilian address data.
 Example:
 --------
 >>> from lfas import SearchEngine
->>> engine = SearchEngine()
+>>> engine = SearchEngine()  # Uses ./lmdb_data
+>>> engine = SearchEngine(db_path="./my_index")  # Custom path
 >>> engine.index({'rua': 'Avenida Paulista', 'numero': '1578'}, doc_id=0)
 >>> engine.flush()
 >>> results = engine.search({'rua': 'Paulista'}, top_k=10)
@@ -17,7 +18,8 @@ try:
 except ImportError:
     _PySearchEngine = None
 
-from typing import Dict, List, Tuple
+from pathlib import Path
+from typing import Dict, List, Tuple, Union
 
 __version__ = "0.1.0"
 __all__ = ["SearchEngine", "PySearchEngine"]
@@ -31,7 +33,8 @@ class SearchEngine:
     
     Example
     -------
-    >>> engine = SearchEngine()
+    >>> engine = SearchEngine()  # Uses ./lmdb_data
+    >>> engine = SearchEngine(db_path="./my_index")  # Custom path
     >>> engine.index({
     ...     'rua': 'Avenida Paulista',
     ...     'numero': '1578',
@@ -41,11 +44,19 @@ class SearchEngine:
     >>> results = engine.search({'rua': 'Paulista'}, top_k=10)
     """
     
-    def __init__(self):
-        """Initialize a new search engine instance."""
+    def __init__(self, db_path: Union[str, Path] = "./lmdb_data"):
+        """
+        Initialize a new search engine instance.
+        
+        Parameters
+        ----------
+        db_path : str or Path, default="./lmdb_data"
+            Path to the LMDB database directory
+        """
         if _PySearchEngine is None:
             raise ImportError("LFAS Rust module not found. Run 'maturin develop' first.")
-        self.engine = _PySearchEngine()
+        self.engine = _PySearchEngine(db_path=str(db_path))
+        self.db_path = str(db_path)
     
     @staticmethod
     def init_logging():
@@ -122,13 +133,31 @@ class SearchEngine:
         """Get current field weight configuration."""
         return self.engine.get_weights()
     
-    def save_metadata(self, path: str = "./lmdb_data/metadata.bin") -> None:
-        """Save index metadata to file."""
-        self.engine.save_metadata(path)
+    def save_metadata(self, path: Union[str, Path] = None) -> None:
+        """
+        Save index metadata to file.
+        
+        Parameters
+        ----------
+        path : str or Path, optional
+            File path for metadata. Defaults to {db_path}/metadata.bin
+        """
+        if path is None:
+            path = Path(self.db_path) / "metadata.bin"
+        self.engine.save_metadata(str(path))
     
-    def load_metadata(self, path: str = "./lmdb_data/metadata.bin") -> None:
-        """Load index metadata from file."""
-        self.engine.load_metadata(path)
+    def load_metadata(self, path: Union[str, Path] = None) -> None:
+        """
+        Load index metadata from file.
+        
+        Parameters
+        ----------
+        path : str or Path, optional
+            File path to metadata. Defaults to {db_path}/metadata.bin
+        """
+        if path is None:
+            path = Path(self.db_path) / "metadata.bin"
+        self.engine.load_metadata(str(path))
     
     @property
     def total_docs(self) -> int:
@@ -141,7 +170,7 @@ class SearchEngine:
         return self.engine.get_stats()
     
     def __repr__(self) -> str:
-        return f"<SearchEngine: {self.total_docs:,} documents indexed>"
+        return f"<SearchEngine: {self.total_docs:,} documents indexed at {self.db_path}>"
 
 
 # Export the Rust class too for backward compatibility

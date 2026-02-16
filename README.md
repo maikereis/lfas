@@ -102,16 +102,16 @@ import pandas as pd
 from pathlib import Path
 from lfas import SearchEngine
 
-engine = SearchEngine()
+index_folder = Path("./my_index")
+index_folder.mkdir(exist_ok=True)
+
+metadata_file = index_folder / "metadata.bin"
+
+engine = SearchEngine(db_path=index_folder)
 
 df = pd.read_csv("addresses.csv")
 chunk_size = 100_000
 total_rows = len(df)
-
-index_folder = Path("./lmdb_data")
-index_folder.mkdir(exist_ok=True)
-
-metadata_file = index_folder / "metadata.bin"
 
 for i in range(0, total_rows, chunk_size):
     batch_start_time = time.time()
@@ -134,16 +134,18 @@ engine.save_metadata(metadata_file)
 from pathlib import Path
 from lfas import SearchEngine
 
-index_folder = Path("./lmdb_data")
+index_folder = Path("./my_index")
+index_folder.mkdir(exist_ok=True)
+
 metadata_file = index_folder / "metadata.bin"
 
-engine = SearchEngine()
+engine = SearchEngine(db_path=index_folder)
 engine.load_metadata(metadata_file)
 
 results = engine.search(
     query={"rua": "Mauriti", "municipio": "Belem", "numero": "31"},
     top_k=10,
-    blocking_k=1000
+    blocking_k=1000,
 )
 
 for doc_id, score in results:

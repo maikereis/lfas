@@ -13,9 +13,9 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::sync::{Arc, RwLock};
 
-// Use RwLock for concurrent reads (searches)
+// Store both the engine and its database path
 static GLOBAL_ENGINE: Lazy<
-    Arc<RwLock<Option<SearchEngine<RecordField, LmdbStorage<RecordField>>>>>,
+    Arc<RwLock<Option<(SearchEngine<RecordField, LmdbStorage<RecordField>>, String)>>>,
 > = Lazy::new(|| Arc::new(RwLock::new(None)));
 
 /// High-performance BM25F search engine for Brazilian address data.
@@ -23,13 +23,14 @@ static GLOBAL_ENGINE: Lazy<
 /// PySearchEngine provides a Python interface to a Rust-based inverted index
 /// with LMDB storage, optimized for field-aware address searching.
 ///
-/// The engine uses a global singleton pattern with LMDB storage in ./lmdb_data
+/// The engine uses a global singleton pattern with configurable LMDB storage path
 /// and supports concurrent read operations (searches) while serializing writes.
 ///
 /// Examples
 /// --------
 /// >>> from lfas import PySearchEngine
-/// >>> engine = PySearchEngine()
+/// >>> engine = PySearchEngine()  # Uses default ./lmdb_data
+/// >>> engine = PySearchEngine(db_path="./my_index")  # Custom path
 /// >>> engine.index_dict(0, {
 /// ...     'rua': 'Avenida Paulista',
 /// ...     'numero': '1578',
@@ -42,6 +43,8 @@ static GLOBAL_ENGINE: Lazy<
 pub struct PySearchEngine {
     custom_weights: Option<HashMap<RecordField, f32>>,
     custom_b_values: Option<HashMap<RecordField, f32>>,
+    #[allow(dead_code)]
+    db_path: String,
 }
 
 #[gen_stub_pymethods]
@@ -64,8 +67,13 @@ impl PySearchEngine {
     /// Create a new search engine instance.
     ///
     /// The constructor initializes or reuses a global LMDB-backed search engine.
-    /// On first call, creates a new LMDB environment in ./lmdb_data directory.
-    /// Subsequent calls reuse the existing environment (singleton pattern).
+    /// On first call with a given path, creates a new LMDB environment.
+    /// Subsequent calls with the same path reuse the existing environment (singleton pattern).
+    ///
+    /// Parameters
+    /// ----------
+    /// db_path : str, optional
+    ///     Path to the LMDB database directory (default: "./lmdb_data")
     ///
     /// Returns
     /// -------
@@ -74,21 +82,34 @@ impl PySearchEngine {
     ///
     /// Examples
     /// --------
-    /// >>> engine = PySearchEngine()
+    /// >>> engine = PySearchEngine()  # Uses ./lmdb_data
+    /// >>> engine = PySearchEngine(db_path="./my_custom_index")
     #[new]
-    fn new() -> Self {
-        info!("[RUST] PySearchEngine::new() called");
+    #[pyo3(signature = (db_path = "./lmdb_data"))]
+    fn new(db_path: &str) -> Self {
+        info!("[RUST] PySearchEngine::new() called with db_path: {}", db_path);
         let timer = Timer::new("PySearchEngine::new");
 
         // Use write lock only for initialization
         let mut global = GLOBAL_ENGINE.write().unwrap();
-        if global.is_none() {
-            info!("[RUST] Creating new LMDB storage (first time)");
-            let storage = LmdbStorage::<RecordField>::open(std::path::Path::new("./lmdb_data"))
-                .expect("Failed to open LMDB storage");
-            *global = Some(engine::SearchEngine::with_storage(storage));
-        } else {
-            info!("[RUST] Reusing existing LMDB storage");
+        
+        match global.as_ref() {
+            Some((_, existing_path)) if existing_path == db_path => {
+                info!("[RUST] Reusing existing LMDB storage at {}", db_path);
+            }
+            Some((_, existing_path)) => {
+                info!("[RUST] Different path requested. Old: {}, New: {}", existing_path, db_path);
+                info!("[RUST] Creating new LMDB storage at {}", db_path);
+                let storage = LmdbStorage::<RecordField>::open(std::path::Path::new(db_path))
+                    .expect("Failed to open LMDB storage");
+                *global = Some((engine::SearchEngine::with_storage(storage), db_path.to_string()));
+            }
+            None => {
+                info!("[RUST] Creating new LMDB storage (first time) at {}", db_path);
+                let storage = LmdbStorage::<RecordField>::open(std::path::Path::new(db_path))
+                    .expect("Failed to open LMDB storage");
+                *global = Some((engine::SearchEngine::with_storage(storage), db_path.to_string()));
+            }
         }
         drop(global); // Release write lock immediately
 
@@ -98,6 +119,7 @@ impl PySearchEngine {
         PySearchEngine {
             custom_weights: None,
             custom_b_values: None,
+            db_path: db_path.to_string(),
         }
     }
 
@@ -222,7 +244,7 @@ impl PySearchEngine {
     #[pyo3(text_signature = "(self)")]
     fn get_weights(&self) -> HashMap<String, f32> {
         let global = GLOBAL_ENGINE.read().unwrap();
-        let engine = global.as_ref().expect("Engine not initialized");
+        let (engine, _) = global.as_ref().expect("Engine not initialized");
 
         let weights = if let Some(ref custom) = self.custom_weights {
             custom.clone()
@@ -267,7 +289,7 @@ impl PySearchEngine {
     #[pyo3(text_signature = "(self, records)")]
     fn index_batch(&mut self, records: Vec<(usize, HashMap<String, String>)>) {
         let mut global = GLOBAL_ENGINE.write().unwrap(); // Write lock for indexing
-        let engine = global.as_mut().expect("Engine not initialized");
+        let (engine, _) = global.as_mut().expect("Engine not initialized");
 
         // In-memory aggregation: (Field, Term) -> List of DocIds
         // This drastically reduces trips to the LMDB
@@ -345,7 +367,7 @@ impl PySearchEngine {
     #[pyo3(text_signature = "(self, doc_id, record_dict)")]
     fn index_dict(&mut self, doc_id: usize, record_dict: HashMap<String, String>) {
         let mut global = GLOBAL_ENGINE.write().unwrap(); // Write lock for indexing
-        let engine = global.as_mut().expect("Engine not initialized");
+        let (engine, _) = global.as_mut().expect("Engine not initialized");
 
         if doc_id % 10000 == 0 {
             info!(
@@ -434,7 +456,7 @@ impl PySearchEngine {
         let timer = Timer::new("flush");
 
         let mut global = GLOBAL_ENGINE.write().unwrap(); // Write lock for flush
-        let engine = global.as_mut().expect("Engine not initialized");
+        let (engine, _) = global.as_mut().expect("Engine not initialized");
 
         engine.index.storage.flush().map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("Flush failed: {}", e))
@@ -544,7 +566,7 @@ impl PySearchEngine {
 
         // Use write lock (needed to apply custom weights before scoring)
         let mut global = GLOBAL_ENGINE.write().unwrap();
-        let engine = global.as_mut().expect("Engine not initialized");
+        let (engine, _) = global.as_mut().expect("Engine not initialized");
 
         // Apply custom weights if configured
         if let Some(ref weights) = self.custom_weights {
@@ -596,7 +618,7 @@ impl PySearchEngine {
     #[pyo3(text_signature = "(self)")]
     fn get_total_docs(&self) -> usize {
         let global = GLOBAL_ENGINE.read().unwrap(); // Read lock
-        let engine = global.as_ref().expect("Engine not initialized");
+        let (engine, _) = global.as_ref().expect("Engine not initialized");
         engine.metadata.total_docs
     }
 
@@ -615,7 +637,7 @@ impl PySearchEngine {
     #[pyo3(text_signature = "(self)")]
     fn get_stats(&self) -> String {
         let global = GLOBAL_ENGINE.read().unwrap(); // Read lock
-        let engine = global.as_ref().expect("Engine not initialized");
+        let (engine, _) = global.as_ref().expect("Engine not initialized");
         format!("Total docs indexed: {}", engine.metadata.total_docs)
     }
 
@@ -646,7 +668,7 @@ impl PySearchEngine {
     #[pyo3(text_signature = "(self, path)")]
     fn save_metadata(&self, path: &str) -> PyResult<()> {
         let global = GLOBAL_ENGINE.read().unwrap(); // Read lock
-        let engine = global.as_ref().expect("Engine not initialized");
+        let (engine, _) = global.as_ref().expect("Engine not initialized");
 
         let file = File::create(path)?;
         let writer = BufWriter::new(file);
@@ -683,7 +705,7 @@ impl PySearchEngine {
     #[pyo3(text_signature = "(self, path)")]
     fn load_metadata(&mut self, path: &str) -> PyResult<()> {
         let mut global = GLOBAL_ENGINE.write().unwrap(); // Write lock
-        let engine = global.as_mut().expect("Engine not initialized");
+        let (engine, _) = global.as_mut().expect("Engine not initialized");
 
         let file = File::open(path)?;
         let reader = BufReader::new(file);
@@ -720,6 +742,7 @@ impl PySearchEngine {
 /// Features
 /// --------
 /// - LMDB-backed persistent inverted index
+/// - Configurable database path
 /// - Field-aware BM25F scoring
 /// - Concurrent read operations (searches)
 /// - Optimized tokenization for Brazilian addresses
@@ -729,7 +752,7 @@ impl PySearchEngine {
 /// Example
 /// -------
 /// >>> from lfas import PySearchEngine
-/// >>> engine = PySearchEngine()
+/// >>> engine = PySearchEngine(db_path="./my_index")
 /// >>> engine.index_dict(0, {'rua': 'Avenida Paulista', 'numero': '1578'})
 /// >>> engine.flush()
 /// >>> results = engine.search_complex({'rua': 'Paulista'}, top_k=10, blocking_k=1000)
