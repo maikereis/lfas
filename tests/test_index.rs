@@ -29,7 +29,7 @@ fn test_address_field_inverted_index() {
         .get_postings(AddressField::Street, "mauriti")
         .expect("Term not found");
     assert!(street_postings.contains(1));
-    assert_eq!(*street_postings.frequencies.get(&1).unwrap(), 1);
+    assert_eq!(*street_postings.frequencies().get(&1).unwrap(), 1);
 }
 
 #[test]

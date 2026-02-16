@@ -16,7 +16,7 @@ fn bench_storage_io(c: &mut Criterion) {
 
     let mut postings = Postings::new();
     for i in 0..100 { 
-        postings.add_doc(i); 
+        postings.add_occurrence(i); 
     }
 
     group.bench_function("lmdb_put_flush", |b| {
