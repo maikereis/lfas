@@ -110,7 +110,8 @@ metadata_file = index_folder / "metadata.bin"
 engine = SearchEngine(db_path=index_folder)
 
 df = pd.read_csv("addresses.csv")
-chunk_size = 100_000
+
+chunk_size = 500_000
 total_rows = len(df)
 
 for i in range(0, total_rows, chunk_size):
@@ -118,19 +119,28 @@ for i in range(0, total_rows, chunk_size):
 
     chunk = df.iloc[i : i + chunk_size]
 
-    batch_data = [
-        (int(idx), {k: str(v) for k, v in zip(chunk.columns, row) if pd.notna(v)})
-        for idx, row in zip(chunk.index, chunk.values)
-    ]
+    batch_data = []
+    for row_idx, row in chunk.iterrows():
+
+        doc_id = int(row["id"])
+        # Exclude 'id' from indexed fields
+        doc_dict = {k: str(v) for k, v in row.items() if pd.notna(v) and k != "id"} 
+        batch_data.append((doc_id, doc_dict))
 
     engine.index_batch(batch_data)
 
+    elapsed = time.time() - batch_start_time
+    print(f"Indexed {i + len(chunk):,}/{total_rows:,} docs in {elapsed:.2f}s")
+
 engine.flush()
 engine.save_metadata(metadata_file)
+
+print(f"Indexed {total_rows:,} documents")
 ```
 
 ### Searching Addresses
 ```python
+import pandas as pd
 from pathlib import Path
 from lfas import SearchEngine
 
@@ -142,6 +152,8 @@ metadata_file = index_folder / "metadata.bin"
 engine = SearchEngine(db_path=index_folder)
 engine.load_metadata(metadata_file)
 
+df = pd.read_csv("addresses.csv")
+
 results = engine.search(
     query={"rua": "Mauriti", "municipio": "Belem", "numero": "31"},
     top_k=10,
@@ -149,7 +161,19 @@ results = engine.search(
 )
 
 for doc_id, score in results:
-    print(f"Document {doc_id}: {score:.2f}")
+    row = df.query(f"id=={doc_id}").to_dict(orient="records")[0]
+    print(
+        f"""
+    ID={row['id']}
+    Similarity={score:.2f}
+    State={row['estado']}
+    Municipality={row['municipio']}
+    Neighboorhood={row['bairro']}
+    ZipCode={row['cep']}
+    Street={row['rua']}
+    Number={row['numero']}
+    """
+    )
 ```
 
 ## Tokenization Strategy
