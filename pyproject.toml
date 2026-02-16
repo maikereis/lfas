@@ -15,6 +15,7 @@ build-backend = "maturin"
 [tool.maturin]
 module-name = "lfas"
 features = ["pyo3/extension-module"]
+python-source = "python"
 
 [dependency-groups]
 dev = [

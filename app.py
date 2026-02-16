@@ -18,8 +18,9 @@ import pandas as pd
 import streamlit as st
 
 
-from lfas import PySearchEngine
-PySearchEngine.init_logging()
+# Import the friendly wrapper instead of raw PySearchEngine
+from lfas import SearchEngine
+SearchEngine.init_logging()
 
 
 # Default weights configuration
@@ -93,14 +94,14 @@ def delete_index():
 @st.cache_resource
 def get_engine():
     """Get or create the search engine singleton"""
-    engine = PySearchEngine()
+    engine = SearchEngine()
     
     metadata_path = Path("./lmdb_data/metadata.bin")
     
     if metadata_path.exists():
         try:
             engine.load_metadata(str(metadata_path))
-            logging.info(f"Loaded index with {engine.get_total_docs()} docs")
+            logging.info(f"Loaded index with {engine.total_docs} docs")
         except Exception as e:
             logging.error(f"Failed to load metadata: {e}")
             st.error(f"Failed to load existing index: {e}")
@@ -153,7 +154,7 @@ if 'use_custom_weights' not in st.session_state:
 engine = None
 if st.session_state['index_loaded']:
     engine = get_engine()
-    st.session_state['total_docs'] = engine.get_total_docs()
+    st.session_state['total_docs'] = engine.total_docs
 
 
 # 1. Sidebar for Stats & File Upload
@@ -261,8 +262,8 @@ with tab1:
                     
                     # Apply custom weights if enabled
                     if st.session_state['use_custom_weights']:
-                        engine.set_field_weights(st.session_state['custom_weights'])
-                        engine.set_field_b_values(st.session_state['custom_b_values'])
+                        engine.set_weights(st.session_state['custom_weights'])
+                        engine.set_b_values(st.session_state['custom_b_values'])
                     else:
                         engine.reset_weights()
                     
@@ -271,7 +272,8 @@ with tab1:
                     search_log_start = len(log_handler.logs)
                     
                     start_s = time.time()
-                    results = engine.search_complex(active_query, int(top_k), int(blocking_k))
+                    # Use the friendly wrapper's search method
+                    results = engine.search(active_query, int(top_k), int(blocking_k))
                     search_time_ms = (time.time() - start_s) * 1000
                     
                     # Display timing breakdown
