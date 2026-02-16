@@ -13,7 +13,7 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [tool.maturin]
-module-name = "lfas"
+module-name = "lfas._core"
 features = ["pyo3/extension-module"]
 python-source = "python"
 

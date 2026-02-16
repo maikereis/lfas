@@ -13,7 +13,7 @@ Example:
 """
 
 try:
-    from lfas.lfas import PySearchEngine as _PySearchEngine
+    from lfas._core import PySearchEngine as _PySearchEngine
 except ImportError:
     _PySearchEngine = None
 
