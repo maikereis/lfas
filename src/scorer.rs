@@ -148,7 +148,7 @@ where
         // Sort results
         let sort_timer = Timer::new("term-at-a-time::sort_results");
         let mut scores: Vec<_> = accumulators.into_iter().collect();
-        scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scores.sort_by(|a, b| b.1.total_cmp(&a.1));
         drop(sort_timer);
 
         if !scores.is_empty() {
@@ -164,14 +164,17 @@ where
         scores
     }
 
-    fn calculate_avg_lengths(
-        &self,
-        metadata: &FieldMetadata<F>,
-    ) -> std::collections::HashMap<F, f32> {
+    fn calculate_avg_lengths(&self, metadata: &FieldMetadata<F>) -> HashMap<F, f32> {
+        if metadata.total_docs == 0 {
+            return HashMap::new();  // avgdl fallback of 1.0 kicks in at call site
+        }
         metadata
             .total_field_lengths
             .iter()
-            .map(|(&f, &total)| (f, total as f32 / metadata.total_docs as f32))
+            .map(|(&f, &total)| {
+                let avg = (total as f32 / metadata.total_docs as f32).max(1.0);
+                (f, avg)
+            })
             .collect()
     }
 

@@ -298,12 +298,23 @@ impl PySearchEngine {
         for (doc_id, record_dict) in records {
             for (field_name, value) in record_dict {
                 if let Some(field) = self.map_field(&field_name) {
-                    for term in tokenize(&value) {
-                        batch_accumulator
-                            .entry((field, term))
-                            .or_default()
-                            .push(doc_id);
+                    let tokens = tokenize(&value);
+                    let token_count = tokens.len();
+                    for term in tokens {
+                        batch_accumulator.entry((field, term)).or_default().push(doc_id);
                     }
+
+                    engine
+                        .metadata
+                        .lengths
+                        .entry(doc_id)
+                        .or_default()
+                        .insert(field, token_count);
+                    *engine
+                        .metadata
+                        .total_field_lengths
+                        .entry(field)
+                        .or_insert(0) += token_count;
                 }
             }
             engine.metadata.total_docs += 1;

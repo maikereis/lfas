@@ -71,11 +71,11 @@ where
         info!("[SEARCH] Starting search execution");
         let search_timer = Timer::new("SearchEngine::execute");
 
-        // ROUND 1: Use DISTINCTIVE tokens to find candidates
-        info!("[SEARCH] ROUND 1: Finding candidates using distinctive tokens");
+        info!("[SEARCH] ROUND 1: Building candidates (per-field intersect, cross-field union)");
         let round1_timer = Timer::new("Round1::FindCandidates");
 
-        let mut candidates = RoaringBitmap::new();
+        // per_field_candidates[field] = intersection of that field's distinctive token bitmaps
+        let mut per_field_candidates: HashMap<F, RoaringBitmap> = HashMap::new();
         let mut all_query_tokens: Vec<(F, String)> = Vec::new();
 
         for (field, text) in &query.fields {
@@ -83,51 +83,97 @@ where
             let token_set = tokenize_structured(text);
 
             info!(
-                "[SEARCH]   Field {:?} - Distinctive tokens: {}, All tokens: {}",
+                "[SEARCH]   Field {:?} — distinctive: {}, all: {}",
                 field,
                 token_set.distinctive.len(),
                 token_set.all.len()
             );
 
             // Round 1: Union of distinctive tokens (any match qualifies)
+
+            // Within-field: intersect distinctive token bitmaps.
+            // We start with None (meaning "universe") and narrow down with each token.
+            let mut field_bitmap: Option<RoaringBitmap> = None;
+
             for token in &token_set.distinctive {
-                if let Some(postings) = self.index.get_postings(*field, token) {
-                    let before = candidates.len();
-                    candidates |= postings.bitmap();
-                    let after = candidates.len();
-                    debug!(
-                        "[SEARCH]     Token '{}' added {} candidates (total: {} -> {})",
-                        token,
-                        after - before,
-                        before,
-                        after
+                match self.index.get_postings(*field, token) {
+                    Some(postings) => {
+                        let before = field_bitmap.as_ref().map(|b| b.len()).unwrap_or(u64::MAX);
+                        field_bitmap = Some(match field_bitmap {
+                            None => postings.bitmap().clone(),
+                            Some(existing) => existing & postings.bitmap(),
+                        });
+                        let after = field_bitmap.as_ref().map(|b| b.len()).unwrap_or(0);
+                        debug!(
+                            "[SEARCH]     Token '{}' narrowed field candidates: {} → {}",
+                            token, before, after
+                        );
+                    }
+                    None => {
+                        // Token not in index for this field.
+                        // For a strict AND we would zero out the bitmap here.
+                        // Instead we skip it so a single missing token (e.g. a typo)
+                        // doesn't eliminate all candidates for the field.
+                        debug!(
+                            "[SEARCH]     Token '{}' not found in field {:?}, skipping",
+                            token, field
+                        );
+                    }
+                }
+            }
+
+            if let Some(bitmap) = field_bitmap {
+                if !bitmap.is_empty() {
+                    info!(
+                        "[SEARCH]   Field {:?} contributed {} candidates",
+                        field,
+                        bitmap.len()
+                    );
+                    // Cross-field: union
+                    per_field_candidates
+                        .entry(*field)
+                        .and_modify(|e| *e |= &bitmap)
+                        .or_insert(bitmap);
+                } else {
+                    info!(
+                        "[SEARCH]   Field {:?} intersection is empty — skipping",
+                        field
                     );
                 }
             }
 
-            // Collect ALL tokens for Round 2 scoring
+            // Collect ALL tokens for Round 2 scoring regardless of field result
             for token in token_set.all {
                 all_query_tokens.push((*field, token));
             }
         }
 
-        // FALLBACK: If no distinctive tokens found candidates, use rarest tokens
-        if candidates.is_empty() && !all_query_tokens.is_empty() {
-            info!("[SEARCH] FALLBACK: No distinctive tokens found candidates, using rarest tokens");
+        // Merge all per-field bitmaps into one candidate set
+        let mut candidates = RoaringBitmap::new();
+        for bitmap in per_field_candidates.values() {
+            candidates |= bitmap;
+        }
 
-            // Use pre-computed document frequency from metadata
+        drop(round1_timer);
+        info!(
+            "[SEARCH] ROUND 1 Complete: {} candidates from {} fields",
+            candidates.len(),
+            per_field_candidates.len()
+        );
+
+        if candidates.is_empty() {
+            info!("[SEARCH] FALLBACK: no distinctive-token candidates, using rarest tokens");
+
             let mut token_rareness: Vec<(&F, &String, usize)> = Vec::new();
-
             for (field, token) in &all_query_tokens {
                 if let Some(&df) = self.metadata.term_df.get(&(*field, token.clone())) {
                     token_rareness.push((field, token, df));
                 }
             }
 
-            // Sort by rarity (smallest document frequency = most selective)
+            // Sort ascending by document frequency — rarest first
             token_rareness.sort_by_key(|(_, _, df)| *df);
 
-            // Use up to 5 rarest tokens to build candidate set
             let k_rarest = 5.min(token_rareness.len());
             info!("[SEARCH] Using {} rarest tokens for fallback", k_rarest);
 
@@ -135,30 +181,23 @@ where
                 if let Some(postings) = self.index.get_postings(**field, token) {
                     let before = candidates.len();
                     candidates |= postings.bitmap();
-                    let after = candidates.len();
                     info!(
                         "[SEARCH]   Fallback token '{}' (df={}) added {} candidates (total: {})",
                         token,
                         df,
-                        after - before,
-                        after
+                        candidates.len() - before,
+                        candidates.len()
                     );
                 }
             }
         }
-
-        drop(round1_timer);
-        info!(
-            "[SEARCH] ROUND 1 Complete: {} candidates found",
-            candidates.len()
-        );
 
         if candidates.is_empty() {
             info!("[SEARCH] No candidates found, returning empty results");
             return vec![];
         }
 
-        // ROUND 2: Score candidates using ALL tokens (including weak n-grams)
+        // ROUND 2: Score candidates with full BM25F over ALL query tokens    //
         info!(
             "[SEARCH] ROUND 2: Scoring {} candidates with {} query tokens",
             candidates.len(),
@@ -173,7 +212,6 @@ where
 
         info!("[SEARCH] Scored {} documents", scored_results.len());
 
-        // Take top-k results
         let final_results: Vec<SearchHit> = scored_results
             .into_iter()
             .take(query.top_k)

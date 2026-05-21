@@ -345,11 +345,45 @@ pub fn tokenize_structured(text: &str) -> TokenSet {
 
     // Identity & Specialized Tokens (distinctive)
     for t in &tokens_list {
-        if RE_CEP.is_match(t) || UFS_SET.contains(t.as_str()) {
+        if RE_CEP.is_match(t) {
             distinctive_tokens.insert(t.clone());
+            all_tokens.insert(t.clone());
+            continue;
         }
-        if RE_NUMBER.is_match(t) && t.len() >= 1 {
-            // House numbers are distinctive
+
+        if RE_NUMBER.is_match(t) {
+            // Suppress "000" — it is the trailing suffix of countless CEPs
+            // (e.g. 68515-000, 69000-000) and adds enormous noise to candidate sets.
+            if t == "000" {
+                // Still available for scoring if it somehow reaches all_tokens via other paths,
+                // but we explicitly skip it here so it never drives candidate retrieval.
+                continue;
+            }
+
+            // Only treat numbers with 4+ digits as distinctive.
+            // 1-3 digit house numbers (e.g. "87", "195") appear in virtually every
+            // address block and make the candidate set too large to be useful.
+            // They still land in all_tokens for BM25F scoring.
+            if t.len() >= 4 {
+                distinctive_tokens.insert(t.clone());
+            }
+            all_tokens.insert(t.clone());
+            continue;
+        }
+
+        if UFS_SET.contains(t.as_str()) {
+            distinctive_tokens.insert(t.clone());
+            all_tokens.insert(t.clone());
+            continue;
+        }
+
+        // Words that are not address-type abbreviations/labels and are at least 4 chars
+        // long are proper name fragments (street names, neighbourhood names, person names).
+        // Treating them as distinctive means they drive candidate retrieval, so a query
+        // for "rua sao paulo" actually narrows the candidate set to documents containing
+        // "paulo" rather than relying solely on a non-selective house number.
+        let is_address_type = ADDRESS_TYPE_SET.contains(t.as_str());
+        if !is_address_type && t.len() >= 4 {
             distinctive_tokens.insert(t.clone());
         }
         all_tokens.insert(t.clone());
