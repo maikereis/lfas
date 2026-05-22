@@ -1,3 +1,4 @@
+#[cfg(feature = "python")]
 use pyo3::pyclass;
 
 pub mod engine;
@@ -14,7 +15,7 @@ pub mod python;
 
 pub type DocId = usize;
 
-#[pyclass]
+#[cfg_attr(feature = "python", pyclass)]
 #[derive(
     Hash, Eq, PartialEq, Clone, Copy, Ord, PartialOrd, Debug, serde::Serialize, serde::Deserialize,
 )]
@@ -65,7 +66,6 @@ pub struct StructuredQuery<F> {
     pub fields: Vec<(F, String)>,
     pub top_k: usize,
     pub blocking_k: usize,
-
 }
 
 #[derive(Debug)]

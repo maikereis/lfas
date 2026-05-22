@@ -1,4 +1,45 @@
+//! Python bindings for the LFAS search engine (PyO3 layer).
+//!
+//! This module exposes [`PySearchEngine`], a PyO3 class that wraps the Rust
+//! [`SearchEngine`] behind a process-wide singleton (`GLOBAL_ENGINE`).
+//!
+//! ## Singleton pattern
+//!
+//! A single `SearchEngine<RecordField, LmdbStorage>` lives inside
+//! `GLOBAL_ENGINE`.  All `PySearchEngine` Python objects share it.  This
+//! mirrors how Python code typically works: one process, one database path,
+//! many references.  Switching paths (rare) creates a new engine and discards
+//! the old one.
+//!
+//! ## Locking strategy
+//!
+//! | Operation              | Lock mode | Reason                                      |
+//! |------------------------|-----------|---------------------------------------------|
+//! | `new` (path change)    | write     | Replaces the global engine                  |
+//! | `index_dict`           | write     | Mutates index and metadata                  |
+//! | `index_batch`          | write     | Mutates index and metadata                  |
+//! | `flush`                | write     | Commits LMDB write buffer                   |
+//! | `load_metadata`        | write     | Replaces `engine.metadata`                  |
+//! | `search_complex`       | **read**  | Read-only; scorer is per-call stack value   |
+//! | `get_weights`          | read      | Read-only                                   |
+//! | `get_total_docs`       | read      | Read-only                                   |
+//! | `get_stats`            | read      | Read-only                                   |
+//! | `save_metadata`        | read      | Serialises metadata without modifying it    |
+//!
+//! Because `search_complex` holds only a read lock, any number of Python
+//! threads can search simultaneously.  The GIL does **not** provide the
+//! serialisation here — the `RwLock` does, and reads are not exclusive.
+//!
+//! ## Custom weights
+//!
+//! Weights and b-values are stored on each `PySearchEngine` *instance*, not on
+//! the global engine.  `search_complex` builds a throw-away [`BM25FScorer`] on
+//! the stack from these per-instance values and passes it to
+//! [`SearchEngine::execute_with_scorer`].  The global scorer is never written
+//! during a search.
+
 use crate::engine;
+use crate::scorer::BM25FScorer;
 use crate::storage::PostingsStorage;
 use crate::timing::Timer;
 use crate::tokenizer::tokenize;
@@ -13,36 +54,84 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::sync::{Arc, RwLock};
 
-// Store both the engine and its database path
+/// Process-wide singleton holding the active `SearchEngine` and the LMDB path
+/// it was opened with.
+///
+/// Wrapped in `Arc<RwLock<…>>` so that:
+/// * multiple Python threads can hold read locks simultaneously (concurrent
+///   searches),
+/// * write operations (indexing, flush, metadata load) are exclusive.
+///
+/// `Lazy` ensures the `RwLock` is initialised exactly once, the first time any
+/// `PySearchEngine` is constructed.
 static GLOBAL_ENGINE: Lazy<
     Arc<RwLock<Option<(SearchEngine<RecordField, LmdbStorage<RecordField>>, String)>>>,
 > = Lazy::new(|| Arc::new(RwLock::new(None)));
 
 /// High-performance BM25F search engine for Brazilian address data.
 ///
-/// PySearchEngine provides a Python interface to a Rust-based inverted index
-/// with LMDB storage, optimized for field-aware address searching.
+/// `PySearchEngine` provides a Python interface to a Rust-based inverted index
+/// with LMDB storage, optimised for field-aware address searching.
 ///
-/// The engine uses a global singleton pattern with configurable LMDB storage path
-/// and supports concurrent read operations (searches) while serializing writes.
+/// ## Singleton model
 ///
-/// Examples
-/// --------
-/// >>> from lfas import PySearchEngine
-/// >>> engine = PySearchEngine()  # Uses default ./lmdb_data
-/// >>> engine = PySearchEngine(db_path="./my_index")  # Custom path
-/// >>> engine.index_dict(0, {
-/// ...     'rua': 'Avenida Paulista',
-/// ...     'numero': '1578',
-/// ...     'municipio': 'São Paulo'
-/// ... })
-/// >>> engine.flush()
-/// >>> results = engine.search_complex({'rua': 'Paulista'}, top_k=10, blocking_k=1000)
+/// All `PySearchEngine` instances share a single global
+/// `SearchEngine<RecordField, LmdbStorage>` (see `GLOBAL_ENGINE`).  Creating a
+/// second instance pointing to the **same** path reuses the existing engine at
+/// zero cost.  Creating one pointing to a **different** path replaces the
+/// global engine (rare; intended for testing or path migration).
+///
+/// ## Concurrency model
+///
+/// `search_complex` holds only a *read* lock on the global engine, so multiple
+/// Python threads can run searches truly in parallel.  Write operations
+/// (`index_dict`, `index_batch`, `flush`, `load_metadata`) hold an exclusive
+/// write lock and will block — and be blocked by — any concurrent reader.
+///
+/// ## Custom scoring
+///
+/// Field weights and b-values are stored **per instance** in `custom_weights`
+/// and `custom_b_values`.  They are applied at search time by constructing a
+/// throw-away [`BM25FScorer`] on the stack; the global engine's scorer is never
+/// modified.  This means two `PySearchEngine` objects with different weights can
+/// search the same index concurrently without interference.
+///
+/// ## Examples
+///
+/// ```python
+/// from lfas import PySearchEngine
+/// engine = PySearchEngine()                          # default ./lmdb_data
+/// engine = PySearchEngine(db_path="./my_index")      # custom path
+/// engine.index_dict(0, {
+///     'rua': 'Avenida Paulista',
+///     'numero': '1578',
+///     'municipio': 'São Paulo',
+/// })
+/// engine.flush()
+/// results = engine.search_complex({'rua': 'Paulista'}, top_k=10, blocking_k=1000)
+/// ```
 #[gen_stub_pyclass]
 #[pyclass]
 pub struct PySearchEngine {
+    /// Per-instance custom field importance weights (`w_f` in BM25F).
+    ///
+    /// `None` means "use the global engine's defaults".  When `Some`, these
+    /// values are merged with the engine defaults (missing fields fall back to
+    /// defaults) at the start of each `search_complex` call.  The global
+    /// engine's `scorer.field_weights` is **never** written.
     custom_weights: Option<HashMap<RecordField, f32>>,
+
+    /// Per-instance BM25F length-normalisation parameters (`b_f`).
+    ///
+    /// `None` means "use the global engine's defaults".  Semantics mirror
+    /// `custom_weights`.  Setting `b = 0.0` disables length normalisation for
+    /// that field (appropriate for fixed-length fields like CEP or estado).
     custom_b_values: Option<HashMap<RecordField, f32>>,
+
+    /// The LMDB path this instance was created with.
+    ///
+    /// Stored for informational purposes (repr, Python wrapper defaults for
+    /// metadata paths).  The authoritative path lives inside `GLOBAL_ENGINE`.
     #[allow(dead_code)]
     db_path: String,
 }
@@ -64,25 +153,34 @@ impl PySearchEngine {
         let _ = pyo3_log::try_init();
     }
 
-    /// Create a new search engine instance.
+    /// Create a new `PySearchEngine` instance.
     ///
-    /// The constructor initializes or reuses a global LMDB-backed search engine.
-    /// On first call with a given path, creates a new LMDB environment.
-    /// Subsequent calls with the same path reuse the existing environment (singleton pattern).
+    /// On the first call (or when `db_path` differs from the currently open
+    /// database), opens an LMDB environment at `db_path` and stores it in
+    /// `GLOBAL_ENGINE`.  Subsequent calls with the **same** path reuse the
+    /// existing environment without any I/O.
+    ///
+    /// The write lock on `GLOBAL_ENGINE` is held only for the duration of
+    /// engine initialisation and is released before the constructor returns.
+    /// Concurrent searches in other threads are therefore blocked only briefly
+    /// during the first construction.
     ///
     /// Parameters
     /// ----------
     /// db_path : str, optional
-    ///     Path to the LMDB database directory (default: "./lmdb_data")
+    ///     Path to the LMDB database directory.  The directory is created by
+    ///     the Python wrapper (`SearchEngine.__init__`) before this constructor
+    ///     is called, so it is expected to exist by the time Rust sees it.
+    ///     Default: `"./lmdb_data"`.
     ///
-    /// Returns
-    /// -------
-    /// PySearchEngine
-    ///     A new search engine instance with default BM25F parameters.
+    /// Panics
+    /// ------
+    /// Panics if LMDB fails to open the environment (e.g. path is not a
+    /// directory, insufficient file-descriptor limit, or corrupt database).
     ///
     /// Examples
     /// --------
-    /// >>> engine = PySearchEngine()  # Uses ./lmdb_data
+    /// >>> engine = PySearchEngine()
     /// >>> engine = PySearchEngine(db_path="./my_custom_index")
     #[new]
     #[pyo3(signature = (db_path = "./lmdb_data"))]
@@ -90,16 +188,18 @@ impl PySearchEngine {
         info!("[RUST] PySearchEngine::new() called with db_path: {}", db_path);
         let timer = Timer::new("PySearchEngine::new");
 
-        // Use write lock only for initialization
+        // Write lock only during initialization; released before any search.
         let mut global = GLOBAL_ENGINE.write().unwrap();
-        
+
         match global.as_ref() {
             Some((_, existing_path)) if existing_path == db_path => {
                 info!("[RUST] Reusing existing LMDB storage at {}", db_path);
             }
             Some((_, existing_path)) => {
-                info!("[RUST] Different path requested. Old: {}, New: {}", existing_path, db_path);
-                info!("[RUST] Creating new LMDB storage at {}", db_path);
+                info!(
+                    "[RUST] Different path requested. Old: {}, New: {}",
+                    existing_path, db_path
+                );
                 let storage = LmdbStorage::<RecordField>::open(std::path::Path::new(db_path))
                     .expect("Failed to open LMDB storage");
                 *global = Some((engine::SearchEngine::with_storage(storage), db_path.to_string()));
@@ -111,7 +211,7 @@ impl PySearchEngine {
                 *global = Some((engine::SearchEngine::with_storage(storage), db_path.to_string()));
             }
         }
-        drop(global); // Release write lock immediately
+        drop(global); // Release write lock immediately.
 
         drop(timer);
         info!("[RUST] PySearchEngine created successfully");
@@ -125,33 +225,25 @@ impl PySearchEngine {
 
     /// Set custom field importance weights for BM25F scoring.
     ///
-    /// Field weights control how much each field contributes to the final
-    /// relevance score. Higher weights make a field more important.
+    /// Weights are stored on this `PySearchEngine` instance only — the global
+    /// engine is never touched — so different Python objects can use different
+    /// weights concurrently without any locking.
     ///
     /// Parameters
     /// ----------
     /// weights : dict[str, float]
-    ///     Dictionary mapping field names to weight values.
-    ///     Valid field names: 'estado', 'municipio', 'bairro', 'cep',
+    ///     Field names → weight values.
+    ///     Valid fields: 'estado', 'municipio', 'bairro', 'cep',
     ///     'tipo_logradouro', 'rua', 'numero', 'complemento', 'nome'
-    ///
-    /// Examples
-    /// --------
-    /// >>> engine.set_field_weights({
-    /// ...     'cep': 15.0,      # CEP very important
-    /// ...     'numero': 12.0,   # Street number important
-    /// ...     'rua': 5.0        # Street name moderately important
-    /// ... })
     ///
     /// Notes
     /// -----
     /// Default weights:
-    /// - numero: 10.0, cep: 8.0, rua: 5.0, municipio: 3.0, bairro: 2.0,
+    ///   numero: 10.0, cep: 8.0, rua: 5.0, municipio: 3.0, bairro: 2.0,
     ///   complemento: 1.5, estado: 1.0, nome: 1.0, tipo_logradouro: 0.5
     #[pyo3(text_signature = "(self, weights)")]
     fn set_field_weights(&mut self, weights: HashMap<String, f32>) {
         let mut field_weights = HashMap::new();
-
         for (field_name, weight) in weights {
             if let Some(field) = self.map_field(&field_name) {
                 field_weights.insert(field, weight);
@@ -160,7 +252,6 @@ impl PySearchEngine {
                 info!("[RUST] Warning: Unknown field '{}'", field_name);
             }
         }
-
         self.custom_weights = Some(field_weights);
         info!(
             "[RUST] Custom weights configured for {} fields",
@@ -170,37 +261,24 @@ impl PySearchEngine {
 
     /// Set length normalization (b) parameters for BM25F scoring.
     ///
-    /// The b parameter controls how much document length affects scoring.
-    /// - b=0.0: No normalization (field length ignored)
-    /// - b=0.75: Standard normalization (recommended)
-    /// - b=1.0: Full normalization (heavily penalizes long fields)
+    /// Like `set_field_weights`, these are stored per-instance and never
+    /// written to the global engine, enabling concurrent searches with
+    /// different configurations.
     ///
     /// Parameters
     /// ----------
     /// b_values : dict[str, float]
-    ///     Dictionary mapping field names to b values (0.0 to 1.0).
-    ///     Valid field names: 'estado', 'municipio', 'bairro', 'cep',
-    ///     'tipo_logradouro', 'rua', 'numero', 'complemento', 'nome'
-    ///
-    /// Examples
-    /// --------
-    /// >>> engine.set_field_b_values({
-    /// ...     'cep': 0.0,      # No normalization (fixed-length)
-    /// ...     'numero': 0.0,   # No normalization (fixed-length)
-    /// ...     'rua': 0.75,     # Standard normalization
-    /// ...     'bairro': 0.5    # Moderate normalization
-    /// ... })
+    ///     Field names → b values (0.0 = no normalisation, 1.0 = full).
     ///
     /// Notes
     /// -----
     /// Default b-values:
-    /// - numero, cep, estado, tipo_logradouro: 0.0 (fixed-length identifiers)
-    /// - municipio, complemento: 0.5 (moderate normalization)
-    /// - rua, bairro, nome: 0.75 (standard normalization)
+    ///   numero, cep, estado, tipo_logradouro: 0.0
+    ///   municipio, complemento: 0.5
+    ///   rua, bairro, nome: 0.75
     #[pyo3(text_signature = "(self, b_values)")]
     fn set_field_b_values(&mut self, b_values: HashMap<String, f32>) {
         let mut field_b = HashMap::new();
-
         for (field_name, b_value) in b_values {
             if let Some(field) = self.map_field(&field_name) {
                 field_b.insert(field, b_value);
@@ -209,7 +287,6 @@ impl PySearchEngine {
                 info!("[RUST] Warning: Unknown field '{}'", field_name);
             }
         }
-
         self.custom_b_values = Some(field_b);
         info!(
             "[RUST] Custom b-values configured for {} fields",
@@ -217,7 +294,7 @@ impl PySearchEngine {
         );
     }
 
-    /// Reset field weights and b-values to default settings.
+    /// Reset field weights and b-values to engine defaults.
     ///
     /// Examples
     /// --------
@@ -229,12 +306,19 @@ impl PySearchEngine {
         info!("[RUST] Reset to default weights");
     }
 
-    /// Get current field weight configuration.
+    /// Return the effective field weight configuration for this instance.
+    ///
+    /// If custom weights have been set via `set_field_weights`, those are
+    /// returned.  Otherwise the global engine's default weights are returned.
+    /// In both cases the map is keyed by lowercase field-name strings
+    /// (e.g. `"rua"`, `"cep"`).
+    ///
+    /// This method acquires a **read** lock and is safe to call concurrently.
     ///
     /// Returns
     /// -------
     /// dict[str, float]
-    ///     Dictionary of field names to current weight values.
+    ///     Field name → effective weight value.
     ///
     /// Examples
     /// --------
@@ -260,39 +344,43 @@ impl PySearchEngine {
 
     /// Index multiple documents in a single batch operation.
     ///
-    /// This is the recommended method for bulk indexing as it's significantly
-    /// faster than individual index_dict() calls. Uses in-memory aggregation
-    /// to minimize LMDB transaction overhead.
+    /// Preferred over `index_dict` for bulk ingestion; it is 10–20× faster
+    /// because it aggregates all (field, term) → doc_id mappings in memory
+    /// first and then performs exactly **one LMDB read + one write per unique
+    /// term** in the batch, instead of a read-modify-write for every token of
+    /// every document.
+    ///
+    /// This method acquires a **write** lock for its entire duration.
     ///
     /// Parameters
     /// ----------
     /// records : list[tuple[int, dict[str, str]]]
-    ///     List of (doc_id, record_dict) tuples where:
-    ///     - doc_id: Unique document identifier (must be >= 0)
-    ///     - record_dict: Dictionary of field names to values
+    ///     Each element is `(doc_id, field_dict)` where:
+    ///     - `doc_id` is a non-negative integer unique identifier.
+    ///     - `field_dict` maps field names to string values.  Unknown field
+    ///       names are silently ignored by `map_field`.
+    ///
+    /// Notes
+    /// -----
+    /// - Call `flush()` after each batch to commit the LMDB write buffer.
+    /// - Metadata (`lengths`, `total_field_lengths`, `term_df`) is updated
+    ///   within the same write lock, so readers see a consistent snapshot.
+    /// - Recommended batch size: 100 000–500 000 documents for optimal
+    ///   throughput (≈ 100 000–200 000 docs/sec on typical hardware).
     ///
     /// Examples
     /// --------
     /// >>> batch = [
     /// ...     (0, {'rua': 'Rua A', 'municipio': 'Belém'}),
     /// ...     (1, {'rua': 'Rua B', 'municipio': 'Belém'}),
-    /// ...     (2, {'rua': 'Rua C', 'municipio': 'Belém'})
     /// ... ]
     /// >>> engine.index_batch(batch)
     /// >>> engine.flush()
-    ///
-    /// Performance
-    /// -----------
-    /// - Processes 100,000-200,000 documents/second
-    /// - Use batch sizes of 100,000-500,000 for optimal performance
-    /// - Call flush() after each batch to ensure persistence
     #[pyo3(text_signature = "(self, records)")]
     fn index_batch(&mut self, records: Vec<(usize, HashMap<String, String>)>) {
-        let mut global = GLOBAL_ENGINE.write().unwrap(); // Write lock for indexing
+        let mut global = GLOBAL_ENGINE.write().unwrap();
         let (engine, _) = global.as_mut().expect("Engine not initialized");
 
-        // In-memory aggregation: (Field, Term) -> List of DocIds
-        // This drastically reduces trips to the LMDB
         let mut batch_accumulator: HashMap<(RecordField, String), Vec<usize>> = HashMap::new();
 
         for (doc_id, record_dict) in records {
@@ -303,7 +391,6 @@ impl PySearchEngine {
                     for term in tokens {
                         batch_accumulator.entry((field, term)).or_default().push(doc_id);
                     }
-
                     engine
                         .metadata
                         .lengths
@@ -320,8 +407,6 @@ impl PySearchEngine {
             engine.metadata.total_docs += 1;
         }
 
-        // Batch writing to Storage
-        // Now we only perform ONE read and ONE write per single term in the batch
         for ((field, term), mut doc_ids) in batch_accumulator {
             doc_ids.sort_unstable();
             doc_ids.dedup();
@@ -339,45 +424,40 @@ impl PySearchEngine {
 
             let key = (field, term.clone());
             engine.metadata.term_df.insert(key, postings.len());
-
-            // The LmdbStorage we have already has a WriteBuffer,
-            // so this will be extremely fast.
             engine.index.storage.put(field, term, postings).unwrap();
         }
     }
 
     /// Index a single document with field-value pairs.
     ///
-    /// For bulk indexing, use index_batch() instead as it's 10-20x faster.
+    /// Tokenises each field value with the address-aware tokeniser, updates the
+    /// inverted index, and records per-document field lengths and term document
+    /// frequencies used by the BM25F scorer.
+    ///
+    /// For bulk ingestion use `index_batch()` instead — it performs the same
+    /// work 10–20× faster by batching LMDB transactions.
+    ///
+    /// This method acquires a **write** lock for its entire duration.
     ///
     /// Parameters
     /// ----------
     /// doc_id : int
-    ///     Unique document identifier (must be >= 0)
+    ///     Non-negative unique document identifier.  If `doc_id` is larger than
+    ///     the current `total_docs` counter, the counter is advanced to
+    ///     `doc_id + 1`.
     /// record_dict : dict[str, str]
-    ///     Dictionary mapping field names to values.
-    ///     Valid fields: 'estado', 'municipio', 'bairro', 'cep',
-    ///     'tipo_logradouro', 'rua', 'numero', 'complemento', 'nome'
-    ///
-    /// Examples
-    /// --------
-    /// >>> engine.index_dict(0, {
-    /// ...     'rua': 'Travessa WE 8',
-    /// ...     'numero': '100',
-    /// ...     'bairro': 'Cidade Nova',
-    /// ...     'municipio': 'Ananindeua',
-    /// ...     'estado': 'PA',
-    /// ...     'cep': '67130-021'
-    /// ... })
+    ///     Field names → raw string values.  Unknown field names are skipped.
+    ///     Empty values produce zero tokens and are effectively no-ops for that
+    ///     field.
     ///
     /// Notes
     /// -----
-    /// - All values are automatically tokenized and normalized
-    /// - Empty or missing fields are ignored
-    /// - Updates metadata for BM25F scoring calculations
+    /// - All values are tokenised and Unicode-normalised (NFD, lowercase).
+    /// - Calling this with the same `doc_id` twice does **not** remove the
+    ///   previous entry; it merges tokens into the existing postings.
     #[pyo3(text_signature = "(self, doc_id, record_dict)")]
     fn index_dict(&mut self, doc_id: usize, record_dict: HashMap<String, String>) {
-        let mut global = GLOBAL_ENGINE.write().unwrap(); // Write lock for indexing
+        let mut global = GLOBAL_ENGINE.write().unwrap();
         let (engine, _) = global.as_mut().expect("Engine not initialized");
 
         if doc_id % 10000 == 0 {
@@ -389,8 +469,6 @@ impl PySearchEngine {
 
         let mut field_count = 0;
         let mut token_count = 0;
-
-        // Track unique terms by document
         let mut doc_terms: HashMap<(RecordField, String), bool> = HashMap::new();
 
         for (key, text) in record_dict {
@@ -438,10 +516,17 @@ impl PySearchEngine {
         }
     }
 
-    /// Flush buffered writes to persistent storage (LMDB).
+    /// Flush the LMDB write buffer to persistent storage.
     ///
-    /// This method commits all pending index operations to disk. Should be
-    /// called after indexing operations to ensure data persistence.
+    /// `LmdbStorage` accumulates writes in a memory buffer and flushes them in
+    /// sorted-key batches to minimise LMDB transaction overhead.  This method
+    /// forces an immediate commit of any remaining buffered entries.
+    ///
+    /// Call `flush()` after each batch of `index_dict` / `index_batch` calls to
+    /// ensure data survives a process restart.  It is also called automatically
+    /// when `LmdbStorage` is dropped.
+    ///
+    /// This method acquires a **write** lock for its entire duration.
     ///
     /// Returns
     /// -------
@@ -450,23 +535,14 @@ impl PySearchEngine {
     /// Raises
     /// ------
     /// RuntimeError
-    ///     If the flush operation fails
-    ///
-    /// Examples
-    /// --------
-    /// >>> engine.index_batch(records)
-    /// >>> engine.flush()  # Commit to disk
-    ///
-    /// Notes
-    /// -----
-    /// - Automatically called when the engine is destroyed
-    /// - For large batch operations, flush periodically (e.g., every 500k docs)
+    ///     If the underlying LMDB `write_txn` or `commit` fails (e.g. disk
+    ///     full, LMDB map size exceeded).
     #[pyo3(text_signature = "(self)")]
     fn flush(&mut self) -> PyResult<()> {
         info!("[RUST] Flushing buffered writes to disk...");
         let timer = Timer::new("flush");
 
-        let mut global = GLOBAL_ENGINE.write().unwrap(); // Write lock for flush
+        let mut global = GLOBAL_ENGINE.write().unwrap();
         let (engine, _) = global.as_mut().expect("Engine not initialized");
 
         engine.index.storage.flush().map_err(|e| {
@@ -480,51 +556,33 @@ impl PySearchEngine {
 
     /// Perform a field-aware BM25F search query.
     ///
-    /// Executes a two-stage search:
-    /// 1. Candidate retrieval using distinctive tokens (CEP, numbers, n-grams)
-    /// 2. BM25F scoring of candidates with all query tokens
+    /// This method acquires only a **read** lock on the global engine, so
+    /// multiple Python threads can run searches truly in parallel.  Custom
+    /// weights/b-values are applied via a lightweight, per-call
+    /// `BM25FScorer` allocated on the stack — the global scorer is never
+    /// touched.
     ///
     /// Parameters
     /// ----------
     /// query_dict : dict[str, str]
     ///     Field-value pairs for the search query.
-    ///     Valid fields: 'estado', 'municipio', 'bairro', 'cep',
-    ///     'tipo_logradouro', 'rua', 'numero', 'complemento', 'nome'
     /// top_k : int
-    ///     Maximum number of results to return
+    ///     Maximum number of results to return.
     /// blocking_k : int
-    ///     Maximum candidate documents to consider (performance/recall tradeoff)
+    ///     Maximum candidate documents to score (performance/recall trade-off).
     ///
     /// Returns
     /// -------
     /// list[tuple[int, float]]
-    ///     List of (doc_id, score) tuples sorted by score (descending)
-    ///
-    /// Examples
-    /// --------
-    /// >>> results = engine.search_complex(
-    /// ...     {
-    /// ...         'rua': 'WE 8',
-    /// ...         'bairro': 'Cidade Nova',
-    /// ...         'municipio': 'Ananindeua'
-    /// ...     },
-    /// ...     top_k=10,
-    /// ...     blocking_k=1000
-    /// ... )
-    /// >>> for doc_id, score in results:
-    /// ...     print(f"Document {doc_id}: {score:.2f}")
+    ///     (doc_id, score) pairs sorted by score descending.
     ///
     /// Notes
     /// -----
-    /// Search Strategy:
-    /// - Uses distinctive tokens (CEP, numbers, street type+number) for candidate retrieval
-    /// - Fallback to rarest tokens if no distinctive matches found
-    /// - Scores all candidates with full BM25F algorithm
-    ///
-    /// Performance Tuning:
-    /// - blocking_k=1000: Fast, may miss some relevant results
-    /// - blocking_k=10000: Balanced performance/recall
-    /// - blocking_k=100000: Slower, highest recall
+    /// Concurrency: safe to call from multiple threads simultaneously.
+    /// blocking_k guidance:
+    ///   1 000  → fastest, may miss some results
+    ///   10 000 → balanced
+    ///   100 000 → highest recall, slower
     #[pyo3(text_signature = "(self, query_dict, top_k, blocking_k)")]
     fn search_complex(
         &self,
@@ -534,10 +592,10 @@ impl PySearchEngine {
     ) -> Vec<(usize, f32)> {
         info!("[RUST] search_complex called");
         info!("[RUST] Query dict size: {}", query_dict.len());
-        info!("[RUST] top_k: {}", top_k);
 
         let total_timer = Timer::new("search_complex::total");
 
+        // ── Parse query fields ──────────────────────────────────────────────
         let parse_timer = Timer::new("search_complex::parse_query");
         let mut query_fields = Vec::new();
 
@@ -545,7 +603,6 @@ impl PySearchEngine {
             if text.trim().is_empty() {
                 continue;
             }
-
             info!("[RUST] Processing field: {} = '{}'", key, text);
             let field = match self.map_field(&key) {
                 Some(f) => f,
@@ -554,11 +611,6 @@ impl PySearchEngine {
             query_fields.push((field, text));
         }
         drop(parse_timer);
-
-        info!(
-            "[RUST] Total query fields after parsing: {}",
-            query_fields.len()
-        );
 
         if query_fields.is_empty() {
             info!("[RUST] No valid query fields, returning empty results");
@@ -571,27 +623,37 @@ impl PySearchEngine {
             blocking_k,
         };
 
-        info!("[RUST] Executing search with blocking_k={}", blocking_k);
-
+        // ── Acquire READ lock — allows concurrent searches ──────────────────
         let exec_timer = Timer::new("search_complex::execute");
+        let global = GLOBAL_ENGINE.read().unwrap(); // ← read lock, not write
+        let (engine, _) = global.as_ref().expect("Engine not initialized");
 
-        // Use write lock (needed to apply custom weights before scoring)
-        let mut global = GLOBAL_ENGINE.write().unwrap();
-        let (engine, _) = global.as_mut().expect("Engine not initialized");
-
-        // Apply custom weights if configured
-        if let Some(ref weights) = self.custom_weights {
-            info!("[RUST] Applying custom weights for search");
-            engine.scorer.field_weights = weights.clone();
-        }
-
-        if let Some(ref b_values) = self.custom_b_values {
-            info!("[RUST] Applying custom b-values for search");
-            engine.scorer.field_b = b_values.clone();
-        }
+        // Build a per-call scorer if custom parameters are configured.
+        // This is a cheap stack allocation; no global state is touched.
+        //
+        // When neither custom_weights nor custom_b_values are set we borrow
+        // the engine's own scorer directly, avoiding any allocation.
+        let local_scorer: BM25FScorer<RecordField>;
+        let scorer_ref: &BM25FScorer<RecordField> =
+            if self.custom_weights.is_some() || self.custom_b_values.is_some() {
+                local_scorer = BM25FScorer {
+                    k1: engine.scorer.k1,
+                    field_weights: self
+                        .custom_weights
+                        .clone()
+                        .unwrap_or_else(|| engine.scorer.field_weights.clone()),
+                    field_b: self
+                        .custom_b_values
+                        .clone()
+                        .unwrap_or_else(|| engine.scorer.field_b.clone()),
+                };
+                &local_scorer
+            } else {
+                &engine.scorer
+            };
 
         let results: Vec<(usize, f32)> = engine
-            .execute(query, blocking_k)
+            .execute_with_scorer(query, blocking_k, scorer_ref)
             .into_iter()
             .map(|hit| (hit.doc_id, hit.score))
             .collect();
@@ -599,7 +661,6 @@ impl PySearchEngine {
         drop(exec_timer);
 
         info!("[RUST] Search returned {} results", results.len());
-
         for (i, (doc_id, score)) in results.iter().take(10).enumerate() {
             debug!(
                 "[RUST] Result #{}: doc_id={}, score={}",
@@ -610,75 +671,73 @@ impl PySearchEngine {
         }
 
         drop(total_timer);
-        info!("[RUST] Returning {} results to Python", results.len());
-
         results
     }
 
-    /// Get the total number of indexed documents.
+    /// Return the total number of indexed documents.
+    ///
+    /// Reads `engine.metadata.total_docs`, which is incremented during
+    /// `index_dict` and `index_batch`.  The value reflects the highest
+    /// `doc_id + 1` seen, not the count of unique doc IDs.
+    ///
+    /// This method acquires a **read** lock and is safe to call concurrently.
     ///
     /// Returns
     /// -------
     /// int
-    ///     Total count of indexed documents
-    ///
-    /// Examples
-    /// --------
-    /// >>> total = engine.get_total_docs()
-    /// >>> print(f"Indexed {total:,} documents")
+    ///     Total indexed document count.
     #[pyo3(text_signature = "(self)")]
     fn get_total_docs(&self) -> usize {
-        let global = GLOBAL_ENGINE.read().unwrap(); // Read lock
+        let global = GLOBAL_ENGINE.read().unwrap();
         let (engine, _) = global.as_ref().expect("Engine not initialized");
         engine.metadata.total_docs
     }
 
-    /// Get formatted index statistics.
+    /// Return a human-readable statistics string for the current index.
+    ///
+    /// Currently reports the total document count.  The format may be extended
+    /// in future versions to include term counts, storage size, etc.
+    ///
+    /// This method acquires a **read** lock and is safe to call concurrently.
     ///
     /// Returns
     /// -------
     /// str
-    ///     Human-readable statistics string
-    ///
-    /// Examples
-    /// --------
-    /// >>> stats = engine.get_stats()
-    /// >>> print(stats)
-    /// Total docs indexed: 1234567
+    ///     Formatted statistics, e.g. `"Total docs indexed: 1234567"`.
     #[pyo3(text_signature = "(self)")]
     fn get_stats(&self) -> String {
-        let global = GLOBAL_ENGINE.read().unwrap(); // Read lock
+        let global = GLOBAL_ENGINE.read().unwrap();
         let (engine, _) = global.as_ref().expect("Engine not initialized");
         format!("Total docs indexed: {}", engine.metadata.total_docs)
     }
 
-    /// Save index metadata to a binary file.
+    /// Serialise index metadata to a binary file.
     ///
-    /// Saves document lengths, field statistics, and term document frequencies
-    /// to a file for later loading with load_metadata().
+    /// Writes `engine.metadata` (document lengths, corpus-wide field lengths,
+    /// total doc count, and term document frequencies) to `path` using
+    /// `bincode` serialisation.  The file can be loaded back with
+    /// `load_metadata` to avoid recomputing metadata after a process restart.
+    ///
+    /// This method acquires a **read** lock; metadata is not modified.
     ///
     /// Parameters
     /// ----------
     /// path : str
-    ///     File path for the metadata file
+    ///     Destination file path.  The Python wrapper defaults this to
+    ///     `{db_path}/metadata.bin` when `None` is passed.
     ///
     /// Raises
     /// ------
     /// IOError
-    ///     If file cannot be created or written
-    ///
-    /// Examples
-    /// --------
-    /// >>> engine.save_metadata("./lmdb_data/metadata.bin")
+    ///     If the file cannot be created or the serialisation fails.
     ///
     /// Notes
     /// -----
-    /// - Required for search operations after restarting
-    /// - Faster than rebuilding metadata from scratch
-    /// - Contains: doc lengths, total field lengths, doc counts, term DFs
+    /// The metadata file is engine-version-specific; do not share it across
+    /// different versions of LFAS that change the `FieldMetadata` schema.
     #[pyo3(text_signature = "(self, path)")]
     fn save_metadata(&self, path: &str) -> PyResult<()> {
-        let global = GLOBAL_ENGINE.read().unwrap(); // Read lock
+        let global = GLOBAL_ENGINE.read().unwrap();
         let (engine, _) = global.as_ref().expect("Engine not initialized");
 
         let file = File::create(path)?;
@@ -687,35 +746,30 @@ impl PySearchEngine {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))
     }
 
-    /// Load index metadata from a binary file.
+    /// Deserialise and replace index metadata from a binary file.
     ///
-    /// Loads previously saved metadata required for search operations.
-    /// Must be called before searching when using a pre-built index.
+    /// Loads a `FieldMetadata` snapshot previously written by `save_metadata`
+    /// and replaces `engine.metadata` in place.  Must be called before
+    /// `search_complex` when working with a pre-built LMDB index that was
+    /// loaded into a freshly constructed engine (i.e. after a process restart).
+    ///
+    /// This method acquires a **write** lock because it replaces `engine.metadata`.
     ///
     /// Parameters
     /// ----------
     /// path : str
-    ///     File path to the metadata file
+    ///     Source file path.  The Python wrapper defaults this to
+    ///     `{db_path}/metadata.bin` and raises `FileNotFoundError` before
+    ///     calling into Rust if the file is absent.
     ///
     /// Raises
     /// ------
     /// IOError
-    ///     If file cannot be read or is corrupted
-    ///
-    /// Examples
-    /// --------
-    /// >>> engine = PySearchEngine()
-    /// >>> engine.load_metadata("./lmdb_data/metadata.bin")
-    /// >>> results = engine.search_complex({'rua': 'Paulista'}, 10, 1000)
-    ///
-    /// Notes
-    /// -----
-    /// - Must match the current LMDB index
-    /// - Enables BM25F scoring calculations
-    /// - Much faster than rebuilding from scratch
+    ///     If the file cannot be opened or deserialisation fails (e.g. corrupt
+    ///     file or schema mismatch from a different LFAS version).
     #[pyo3(text_signature = "(self, path)")]
     fn load_metadata(&mut self, path: &str) -> PyResult<()> {
-        let mut global = GLOBAL_ENGINE.write().unwrap(); // Write lock
+        let mut global = GLOBAL_ENGINE.write().unwrap();
         let (engine, _) = global.as_mut().expect("Engine not initialized");
 
         let file = File::open(path)?;
@@ -726,10 +780,19 @@ impl PySearchEngine {
     }
 }
 
-// Separate impl for internal Rust methods that are not part of the Python API.
-// By staying outside the #[gen_stub_pymethods] block, the macro does not attempt to generate
-// stubs for them — avoiding the "RecordField: PyStubType not satisfied" error.
+// Internal helpers — kept outside #[gen_stub_pymethods] to avoid stub-gen
+// needing `RecordField: PyStubType`.
 impl PySearchEngine {
+    /// Map a Python-side field name string to the corresponding [`RecordField`]
+    /// enum variant.
+    ///
+    /// The comparison is case-insensitive (`to_lowercase()` is applied before
+    /// matching).  Returns `None` for any unrecognised name; callers log a
+    /// warning and skip the field rather than returning an error, so partial
+    /// queries with unknown fields degrade gracefully.
+    ///
+    /// Recognised names: `estado`, `municipio`, `bairro`, `cep`,
+    /// `tipo_logradouro`, `rua`, `numero`, `complemento`, `nome`.
     fn map_field(&self, field_name: &str) -> Option<RecordField> {
         match field_name.to_lowercase().as_str() {
             "estado" => Some(RecordField::Estado),
@@ -746,28 +809,15 @@ impl PySearchEngine {
     }
 }
 
-/// LFAS - Lightning-Fast Address Search
+/// LFAS `_core` Python extension module.
 ///
-/// A high-performance BM25F search engine optimized for Brazilian address data.
+/// This is the compiled Rust extension imported as `lfas._core`.  It exposes
+/// [`PySearchEngine`] to Python.  Users should import from the `lfas` package
+/// directly (via `__init__.py`) rather than from `_core`, which is a private
+/// implementation detail.
 ///
-/// Features
-/// --------
-/// - LMDB-backed persistent inverted index
-/// - Configurable database path
-/// - Field-aware BM25F scoring
-/// - Concurrent read operations (searches)
-/// - Optimized tokenization for Brazilian addresses
-/// - Batch indexing: 100,000+ docs/second
-/// - Search latency: 10-50ms typical
-///
-/// Example
-/// -------
-/// >>> from lfas import PySearchEngine
-/// >>> engine = PySearchEngine(db_path="./my_index")
-/// >>> engine.index_dict(0, {'rua': 'Avenida Paulista', 'numero': '1578'})
-/// >>> engine.flush()
-/// >>> results = engine.search_complex({'rua': 'Paulista'}, top_k=10, blocking_k=1000)
-/// >>> print(results)  # [(doc_id, score), ...]
+/// The module name `_core` is declared in `pyproject.toml` and must match the
+/// `#[pymodule]` function name here.
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     info!("[RUST] PySearchEngine class registered");
@@ -775,11 +825,17 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-/// Called by the `stub_gen` binary to produce the .pyi file.
+/// Entry-point for the `stub_gen` binary.
+///
+/// Reads `pyproject.toml` to discover the module name and output path, then
+/// walks all `#[gen_stub_pyclass]` / `#[gen_stub_pymethods]` annotations to
+/// produce a `lfas.pyi` stub file.  Run with:
+///
+/// ```shell
+/// cargo run --bin stub_gen
+/// ```
 pub fn stub_info() -> pyo3_stub_gen::StubInfo {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    pyo3_stub_gen::StubInfo::from_pyproject_toml(
-        format!("{}/pyproject.toml", manifest_dir)
-    )
-    .expect("Falha ao ler pyproject.toml para gerar stubs")
+    pyo3_stub_gen::StubInfo::from_pyproject_toml(format!("{}/pyproject.toml", manifest_dir))
+        .expect("Failed to read pyproject.toml for stub generation")
 }

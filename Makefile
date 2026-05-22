@@ -1,7 +1,7 @@
 # Variables
 CARGO = cargo
 BINARY_NAME = lfas
-TEST_FLAGS = --all-features
+TEST_FLAGS = --no-default-features
 BENCH_NAME ?= index_benchmark
 
 .PHONY: all build run test benches check clean doc help
